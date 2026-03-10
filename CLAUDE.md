@@ -138,6 +138,14 @@ npm run preview      # Preview production build
 - Stockfish eval handler duplicated in 3 places.
 - `utils/export.ts:542` — O(n^2) game lookup in tournament JSON export.
 
+## Remediation Roadmap
+
+See [`REMEDIATION_PLAN.md`](./REMEDIATION_PLAN.md) for the prioritized fix plan:
+- **P0 (Wave 0):** 10 benchmark-correctness and game-truth bugs — fix first
+- **P1 (Wave 1):** 11 lifecycle/memory/async leaks — fix for production stability
+- **P2 (Wave 2):** 7 shared module extractions + seeded PRNG — buy back velocity
+- **P3 (Wave 3):** 6 ergonomics/polish items — selectors, memoization, types, security
+
 ## Development Notes
 
 - No test suite exists. Manual testing only.
