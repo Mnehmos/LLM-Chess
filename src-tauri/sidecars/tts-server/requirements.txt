@@ -1,0 +1,5 @@
+qwen-tts
+fastapi
+uvicorn[standard]
+soundfile
+torch
