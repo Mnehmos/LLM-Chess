@@ -654,6 +654,21 @@ export const useTournamentStore = create<TournamentStore>()(
               await _waitForNarration();
               console.log('[Replay] Narration complete.');
             }
+            // Generate post-game recap before advancing
+            const replayState = useTournamentStore.getState().activeGameState;
+            if (_commentaryQueue && replayState?.result) {
+              const replayResult = replayState.result.outcome === 'decisive'
+                ? `${replayState.result.winner === 'w' ? replayState.white.displayName : replayState.black.displayName} wins by ${replayState.result.reason}`
+                : `Draw by ${replayState.result.outcome === 'draw' ? replayState.result.reason : 'unknown'}`;
+              await _commentaryQueue.generateRecap(
+                replayState.white.displayName,
+                replayState.black.displayName,
+                replayResult,
+                replayState.moveHistory.length,
+                replayState.moveHistory.map(m => m.move).join(' '),
+              );
+              if (_waitForNarration) await _waitForNarration();
+            }
             set({
               activeRuntime: null,
               isRunning: false,
@@ -1110,6 +1125,20 @@ function runNextGame(llmConfig: LLMProviderConfig): void {
         console.log('[Tournament] Game ended — waiting for narration to finish...');
         await _waitForNarration();
         console.log('[Tournament] Narration complete — advancing.');
+      }
+      // Generate post-game recap before advancing to next game
+      if (_commentaryQueue && finalState.result) {
+        const tourneyResult = finalState.result.outcome === 'decisive'
+          ? `${finalState.result.winner === 'w' ? finalState.white.displayName : finalState.black.displayName} wins by ${finalState.result.reason}`
+          : `Draw by ${finalState.result.outcome === 'draw' ? finalState.result.reason : 'unknown'}`;
+        await _commentaryQueue.generateRecap(
+          finalState.white.displayName,
+          finalState.black.displayName,
+          tourneyResult,
+          finalState.moveHistory.length,
+          finalState.moveHistory.map(m => m.move).join(' '),
+        );
+        if (_waitForNarration) await _waitForNarration();
       }
       useTournamentStore.setState({
         activeRuntime: null,

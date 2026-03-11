@@ -163,6 +163,28 @@ export function CommentaryPanel({ entries, commentatorModelName, onNarrationStar
   const displayName = commentatorModelName.split('/').pop();
   const providerLabel = ttsProvider === 'local' ? 'local' : ttsProvider === 'qwen-cloud' ? 'qwen' : 'openai';
 
+  function exportCommentary() {
+    const lines: string[] = [];
+    for (const entry of entries) {
+      if (!entry.text || entry.text.startsWith('(')) continue;
+      if (entry.isFiller) {
+        lines.push('[Commentary]');
+      } else {
+        const moveLabels = entry.moves.map(m => `Move ${m.moveNumber}. ${m.move} (${m.color === 'w' ? 'White' : 'Black'})`).join(', ');
+        lines.push(moveLabels || '[Commentary]');
+      }
+      lines.push(entry.text);
+      lines.push('');
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'commentary.txt';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="p-4 bg-surface-1 rounded-lg flex flex-col h-full">
       <div className="flex items-center justify-between mb-3">
@@ -187,6 +209,16 @@ export function CommentaryPanel({ entries, commentatorModelName, onNarrationStar
           )}
           {ttsEnabled && ttsStatus?.running && (
             <span className="text-[10px] text-green-400">ready</span>
+          )}
+          {entries.length > 0 && (
+            <button
+              type="button"
+              onClick={exportCommentary}
+              title="Export commentary as text file"
+              className="px-2 py-0.5 rounded text-[10px] font-medium bg-surface-2 text-text-muted hover:text-text-primary transition-colors"
+            >
+              Export
+            </button>
           )}
           <span className="text-xs text-text-muted">{displayName}</span>
         </div>

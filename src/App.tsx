@@ -145,7 +145,7 @@ function GameTab({ gameState, lastMove }: {
     }
     const getTtsMode = () => useSettingsStore.getState().ttsEnabled;
     const getFillerEnabled = () => useSettingsStore.getState().fillerEnabled && useSettingsStore.getState().ttsEnabled;
-    const queue = new CommentaryQueue({ getClient, getCommentatorModel, getTtsMode, getFillerEnabled });
+    const queue = new CommentaryQueue({ getClient, getCommentatorModel, getTtsMode, getFillerEnabled, minCallIntervalMs: 10_000, maxBatchSize: 1 });
     queueRef.current = queue;
     const unsub = queue.onUpdate(setCommentaryEntries);
     return () => {

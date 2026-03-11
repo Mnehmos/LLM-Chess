@@ -426,7 +426,7 @@ COMMENTARY STYLE — Live spoken broadcast narration:
 1. Cover the move with good analysis — name the strategic idea, explain why it matters, note key consequences.
 2. 3-5 sentences. Enough to teach, not so much you ramble.
 3. Conversational, punchy sentences. Natural speech rhythm.
-4. Only mention eval for dramatic swings (blunders, brilliancies, mate threats).
+4. ALWAYS reference the engine's recommended move and compare it to what was played. If they match, say so briefly. If they differ, explain why the deviation was good, neutral, or a mistake.
 5. Narration pace controls the stream — the audience sees what you describe when you describe it.
 
 FORMAT — Plain spoken text ONLY:
@@ -524,7 +524,9 @@ export function buildCommentaryPrompt(ctx: CommentaryContext): ChatMessage[] {
     parts.push('', `--- Stockfish (depth ${ev.depth}) ---`);
     parts.push(`Eval: ${evalStr} (always from White's perspective)`);
     parts.push(`Position: ${positionSummary}`);
-    parts.push(`Best line: ${ev.pv}`);
+    parts.push(`Engine's top move: ${ev.bestMove} (UCI notation)`);
+    parts.push(`Best line (PV): ${ev.pv}`);
+    parts.push(`Player played: ${ctx.lastMove} — always compare this to the engine's top move above and explain if it matches, deviates, or is a blunder/brilliancy.`);
 
     // Detect actual blunders/brilliancies using directional delta
     if (ctx.prevEvalCp !== undefined) {

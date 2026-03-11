@@ -60,6 +60,8 @@ export interface CommentaryQueueConfig {
   systemPromptOverride?: string;
   /** Max moves per batch (1 = move-by-move narration for replay, undefined = batch all). */
   maxBatchSize?: number;
+  /** Minimum ms between commentator LLM calls (rate limiting). Default: 0 (no limit). */
+  minCallIntervalMs?: number;
 }
 
 type UpdateListener = (entries: CommentaryEntry[]) => void;
@@ -119,7 +121,7 @@ function dynamicMaxTokens(
   // ~1.9 visible output tokens per second of TTS audio
   const outputTokens = Math.round(targetTtsSec * 1.9);
   // Clamp: at least 80 (2 sentences), cap at 500 (leaves room for fillers)
-  const outputBudget = Math.min(500, Math.max(80, outputTokens));
+  const outputBudget = Math.min(800, Math.max(350, outputTokens));
 
   // Reasoning models burn thousands of tokens on thinking before output
   if (isReasoning) return outputBudget + 2000;
@@ -139,6 +141,9 @@ export class CommentaryQueue {
 
   /** The highest moveIndex that has completed commentary. -1 = none yet. */
   private _lastCommentedMoveIndex = -1;
+
+  /** Timestamp of last completed (non-filler) commentator LLM call. 0 = never. */
+  private _lastCallCompletedAt = 0;
 
   /** Resolvers waiting for the active commentary to finish. */
   private idleResolvers: (() => void)[] = [];
@@ -226,6 +231,71 @@ export class CommentaryQueue {
       const message = err instanceof Error ? err.message : String(err);
       this.completeEntry(entryIndex, `(Intro error: ${message})`, true);
       this.processNext();
+    }
+  }
+
+  /**
+   * Generate an end-of-game recap commentary entry.
+   * Called after the final move has been narrated.
+   */
+  async generateRecap(
+    whiteModel: string,
+    blackModel: string,
+    result: string,
+    totalMoves: number,
+    moveHistory: string,
+  ): Promise<void> {
+    if (this.destroyed) return;
+    const model = this.config.getCommentatorModel();
+    if (!model.id) return;
+
+    const ttsMode = this.config.getTtsMode?.() ?? false;
+    const recapPrompt = `The game between ${whiteModel} (White) and ${blackModel} (Black) has concluded.
+
+Result: ${result}
+Total moves: ${totalMoves}
+Full game: ${moveHistory}
+
+Provide a post-game recap: summarize the key moments, turning points, and decisive factor. ${ttsMode ? '3-5 sentences, spoken naturally.' : 'Be thorough — cover the opening choices, key middlegame decisions, and the decisive moment. 4-8 sentences.'}`;
+
+    const entry: CommentaryEntry = {
+      id: genId(),
+      moves: [],
+      text: '',
+      streaming: true,
+      timestamp: Date.now(),
+      maxMoveIndex: Number.MAX_SAFE_INTEGER,
+    };
+
+    this.entries = [...this.entries, entry];
+    const entryIndex = this.entries.length - 1;
+    this.emit();
+
+    try {
+      const client = this.config.getClient();
+      const messages: import('../llm/prompts').ChatMessage[] = [
+        { role: 'system', content: this.config.systemPromptOverride ?? `You are an expert chess commentator providing a post-game recap.${ttsMode ? ' Spoken natural language only, no markdown.' : ''}` },
+        { role: 'user', content: recapPrompt },
+      ];
+      const verbosityTokens = model.verbosity ? VERBOSITY_TOKEN_MAP[model.verbosity] : undefined;
+      const raw = await client.requestMoveRaw(
+        model.id,
+        messages,
+        0.8,
+        { promptLevel: 'p0' },
+        (partial) => {
+          if (this.destroyed || entryIndex >= this.entries.length) return;
+          const updated = [...this.entries];
+          updated[entryIndex] = { ...updated[entryIndex], text: partial, streaming: true };
+          this.entries = updated;
+          this.emit();
+        },
+      );
+      void verbosityTokens; // acknowledged — not passable via requestMoveRaw interface
+      this.completeEntry(entryIndex, raw.content);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.completeEntry(entryIndex, `(Recap error: ${message})`);
     }
   }
 
@@ -328,6 +398,16 @@ export class CommentaryQueue {
   private processNext(): void {
     if (this.destroyed || this.active !== null || this.pending.length === 0) return;
 
+    // Rate limiting: enforce minimum interval between commentator LLM calls
+    const minInterval = this.config.minCallIntervalMs ?? 0;
+    if (minInterval > 0 && this._lastCallCompletedAt > 0) {
+      const remaining = minInterval - (Date.now() - this._lastCallCompletedAt);
+      if (remaining > 0) {
+        setTimeout(() => this.processNext(), remaining);
+        return;
+      }
+    }
+
     const batchSize = this.config.maxBatchSize ?? this.pending.length;
     const batch = this.pending.splice(0, Math.min(batchSize, this.pending.length));
     this.active = batch;
@@ -384,41 +464,56 @@ export class CommentaryQueue {
       };
 
       let result: string;
+      const MAX_COMMENTARY_RETRIES = 2;
 
-      if (batch.length === 1) {
-        // Single move — use standard commentary
-        const item = batch[0];
-        const ctx: CommentaryContext = {
-          fen: item.fen,
-          lastMove: item.move,
-          lastMoveColor: item.color,
-          whiteModel: item.whiteModel,
-          blackModel: item.blackModel,
-          moveHistory: item.moveHistory,
-          isCheck: item.isCheck,
-          isCapture: item.isCapture,
-          turnNumber: item.turnNumber,
-          stockfishEval: item.stockfishEval,
-          prevEvalCp: item.prevEvalCp,
-          prevCommentary: this.lastCommentaryText || undefined,
-          ttsMode,
-          systemPromptOverride: this.config.systemPromptOverride,
-          verbosity: model.verbosity,
-        };
+      for (let attempt = 0; attempt <= MAX_COMMENTARY_RETRIES; attempt++) {
+        if (attempt > 0) {
+          // Clear streaming text before retry so stale partial content doesn't linger
+          this.updateEntryText(entryIndex, '');
+        }
 
-        result = await client.requestCommentaryStream(model.id, ctx, (partial) => {
-          this.updateEntryText(entryIndex, partial);
-        }, options);
-      } else {
-        // Batch — use batch prompt (plain text, no structured output)
-        const messages = buildBatchCommentaryPrompt(batch, this.lastCommentaryText || undefined, ttsMode, this.config.systemPromptOverride, model.verbosity);
-        const raw = await client.requestMoveRaw(model.id, messages, 0.8, { promptLevel: 'p0' }, (partial) => {
-          this.updateEntryText(entryIndex, partial);
-        });
-        result = raw.content;
+        if (batch.length === 1) {
+          // Single move — use standard commentary
+          const item = batch[0];
+          const ctx: CommentaryContext = {
+            fen: item.fen,
+            lastMove: item.move,
+            lastMoveColor: item.color,
+            whiteModel: item.whiteModel,
+            blackModel: item.blackModel,
+            moveHistory: item.moveHistory,
+            isCheck: item.isCheck,
+            isCapture: item.isCapture,
+            turnNumber: item.turnNumber,
+            stockfishEval: item.stockfishEval,
+            prevEvalCp: item.prevEvalCp,
+            prevCommentary: this.lastCommentaryText || undefined,
+            ttsMode,
+            systemPromptOverride: this.config.systemPromptOverride,
+            verbosity: model.verbosity,
+          };
+
+          result = await client.requestCommentaryStream(model.id, ctx, (partial) => {
+            this.updateEntryText(entryIndex, partial);
+          }, options);
+        } else {
+          // Batch — use batch prompt (plain text, no structured output)
+          const messages = buildBatchCommentaryPrompt(batch, this.lastCommentaryText || undefined, ttsMode, this.config.systemPromptOverride, model.verbosity);
+          const raw = await client.requestMoveRaw(model.id, messages, 0.8, { promptLevel: 'p0' }, (partial) => {
+            this.updateEntryText(entryIndex, partial);
+          });
+          result = raw.content;
+        }
+
+        // Retry if the LLM returned empty or the fallback placeholder
+        const isEmpty = !result || result.trim() === '' || result.startsWith('(No commentary generated)');
+        if (!isEmpty) break;
+        if (attempt < MAX_COMMENTARY_RETRIES) {
+          console.warn(`[Commentary] Empty result on attempt ${attempt + 1}, retrying...`);
+        }
       }
 
-      this.completeEntry(entryIndex, result);
+      this.completeEntry(entryIndex, result!);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.completeEntry(entryIndex, `(Commentary error: ${message})`);
@@ -449,6 +544,7 @@ export class CommentaryQueue {
     } else {
       this.active = null;
       this.activeEntryIndex = -1;
+      this._lastCallCompletedAt = Date.now();
     }
     this.emit();
 

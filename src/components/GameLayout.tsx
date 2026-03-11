@@ -182,8 +182,17 @@ export function GameLayout({
         moveHistory: visibleMoveHistory,
         currentTurn: Math.floor(visibleMoveHistory.length / 2) + 1,
         currentColor: (visibleMoveHistory.length % 2 === 0 ? 'w' : 'b') as 'w' | 'b',
+        // Gate result/status to narration position — don't spoil the outcome
+        // until the commentator has narrated through the final move.
+        result: displayMoveCount >= gameState.moveHistory.length ? gameState.result : null,
+        status: displayMoveCount >= gameState.moveHistory.length ? gameState.status : 'in_progress' as const,
       }
     : gameState;
+
+  // Gate stockfishEval to narration position — don't spoil the live game eval
+  const visibleStockfishEval = displayMoveCount !== undefined && displayMoveCount !== null && displayMoveCount < gameState.moveHistory.length
+    ? undefined
+    : stockfishEval;
 
   if (livestreamMode) {
     return (
@@ -191,7 +200,7 @@ export function GameLayout({
         {/* Livestream header bar */}
         <LivestreamOverlay
           gameState={gameState}
-          stockfishEval={stockfishEval}
+          stockfishEval={visibleStockfishEval}
           streamingText={streamingText}
           streamingModel={streamingModel}
           displayTurn={displayTurn}
@@ -249,7 +258,7 @@ export function GameLayout({
               game={visibleGameState}
               streamingText={streamingText}
               streamingModel={streamingModel}
-              stockfishEval={stockfishEval}
+              stockfishEval={visibleStockfishEval}
             />
             <MoveHistory moves={visibleMoveHistory} />
             {showHumanMoveInput && <HumanMoveInput />}
@@ -285,7 +294,7 @@ export function GameLayout({
           viewingMoveIndex={viewingMoveIndex}
           setViewingMoveIndex={setViewingMoveIndex}
         />
-        {stockfishEval && <StockfishBar eval={stockfishEval} />}
+        {visibleStockfishEval && <StockfishBar eval={visibleStockfishEval} />}
       </div>
 
       {/* Column 3: Stats, moves, extras */}
@@ -303,7 +312,7 @@ export function GameLayout({
           game={visibleGameState}
           streamingText={streamingText}
           streamingModel={streamingModel}
-          stockfishEval={stockfishEval}
+          stockfishEval={visibleStockfishEval}
         />
         {showHumanMoveInput && <HumanMoveInput />}
         <MoveHistory moves={visibleMoveHistory} />

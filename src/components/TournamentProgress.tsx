@@ -119,7 +119,7 @@ export function TournamentProgress() {
       donationUrl: settings.channelDonationUrl || undefined,
       customPlugLines: settings.channelCustomPlugLines ? settings.channelCustomPlugLines.split('\n').filter(Boolean) : undefined,
     } : undefined;
-    const queue = new CommentaryQueue({ getClient, getCommentatorModel: getCommentatorModelCb, getTtsMode, getDeadAirMs, getFillerEnabled, getAudioBacklog, channelInfo });
+    const queue = new CommentaryQueue({ getClient, getCommentatorModel: getCommentatorModelCb, getTtsMode, getDeadAirMs, getFillerEnabled, getAudioBacklog, channelInfo, minCallIntervalMs: 10_000, maxBatchSize: 1 });
     queueRef.current = queue;
     // Register globally so the store can use waitForMove() for replay pacing
     registerCommentaryQueue(queue);
