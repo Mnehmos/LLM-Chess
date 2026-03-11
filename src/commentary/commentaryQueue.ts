@@ -62,6 +62,8 @@ export interface CommentaryQueueConfig {
   maxBatchSize?: number;
   /** Minimum ms between commentator LLM calls (rate limiting). Default: 0 (no limit). */
   minCallIntervalMs?: number;
+  /** Hard token budget override — bypasses dynamic dead-air calculation. Use for replay mode. */
+  maxTokensOverride?: number;
 }
 
 type UpdateListener = (entries: CommentaryEntry[]) => void;
@@ -174,6 +176,11 @@ export class CommentaryQueue {
   /** Set max batch size (1 = move-by-move narration for replay, undefined = batch all). */
   setMaxBatchSize(size: number | undefined): void {
     this.config = { ...this.config, maxBatchSize: size };
+  }
+
+  /** Override the token budget (bypasses dynamic calculation). Pass undefined to restore auto. */
+  setMaxTokensOverride(tokens: number | undefined): void {
+    this.config = { ...this.config, maxTokensOverride: tokens };
   }
 
   /**
@@ -456,10 +463,14 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
       const deadAirMs = batchTimeMs > 0 ? batchTimeMs : this.getAvgMoveTimeMs();
       // Actual measured dead air from the audio queue (self-tuning feedback)
       const measuredDeadAirMs = this.config.getDeadAirMs?.() ?? 0;
-      // Verbosity overrides token budget when set; otherwise use dynamic dead-air sizing
+      // Verbosity overrides token budget when set; otherwise use dynamic dead-air sizing.
+      // maxTokensOverride (e.g. replay mode) bypasses the dynamic calculation entirely.
       const verbosityTokens = model.verbosity ? VERBOSITY_TOKEN_MAP[model.verbosity] : undefined;
+      const tokenBudget = this.config.maxTokensOverride
+        ?? verbosityTokens
+        ?? dynamicMaxTokens(ttsMode, deadAirMs, model.id, model.maxTokens, measuredDeadAirMs);
       const options = {
-        maxTokens: verbosityTokens ?? dynamicMaxTokens(ttsMode, deadAirMs, model.id, model.maxTokens, measuredDeadAirMs),
+        maxTokens: tokenBudget,
         reasoningEffort: model.reasoningEffort,
       };
 

@@ -141,6 +141,9 @@ export function TournamentProgress() {
     if (queueRef.current) {
       // Replay: move-by-move commentary (batch size 1) + optional historical prompt
       queueRef.current.setMaxBatchSize(1);
+      // Use model.maxTokens if set (controlled by Tokens dropdown), otherwise default to 16k.
+      // No dead-air constraint in replay — we want rich commentary.
+      queueRef.current.setMaxTokensOverride(commentatorModel?.maxTokens ?? 16000);
       if (replayHistoricalContext) {
         const ttsMode = useSettingsStore.getState().ttsEnabled;
         const verbosity = commentatorModel?.verbosity;
@@ -150,9 +153,10 @@ export function TournamentProgress() {
     }
     return () => {
       queueRef.current?.setMaxBatchSize(undefined);
+      queueRef.current?.setMaxTokensOverride(undefined);
       queueRef.current?.setSystemPromptOverride(undefined);
     };
-  }, [replayMode, activeRuntime, replayHistoricalContext, commentatorModel?.verbosity]);
+  }, [replayMode, activeRuntime, replayHistoricalContext, commentatorModel?.verbosity, commentatorModel?.maxTokens]);
 
   // Reset queue on new game — identical for tournament + replay
   useEffect(() => {

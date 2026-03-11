@@ -1,7 +1,9 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useTournamentStore } from '../store/tournamentStore';
+import { useSettingsStore } from '../store/settingsStore';
 import { ModelSelector } from './ModelSelector';
 import { parseSinglePgn, type PgnGame } from '../pgn/parser';
+import { checkTtsHealth } from '../tts/tts-client';
 import type { CommentaryVerbosity, CommentatorMode, ReasoningEffort } from '../engine/types';
 
 const COMMENTATOR_MODES: { value: CommentatorMode; label: string }[] = [
@@ -18,6 +20,9 @@ const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
 ];
 
 const COMMENTATOR_DEPTH_PRESETS = [8, 12, 15, 18, 20, 24];
+
+// Replay has no dead-air constraint — offer a much higher ceiling than live games.
+const REPLAY_TOKEN_PRESETS = [1000, 2000, 4000, 8000, 16000, 32000, 64000];
 
 const VERBOSITY_LEVELS: { value: CommentaryVerbosity; label: string; desc: string }[] = [
   { value: 'brief', label: 'Brief', desc: '1-2 sentences, just the key idea' },
@@ -43,6 +48,32 @@ export function PgnImport() {
   const commentatorDepth = replayCommentatorModel?.stockfishDepth ?? 18;
   const commentatorReasoning = replayCommentatorModel?.reasoningEffort ?? 'high';
   const commentatorVerbosity: CommentaryVerbosity = replayCommentatorModel?.verbosity ?? 'standard';
+  const commentatorTokens = replayCommentatorModel?.maxTokens ?? 16000;
+
+  // TTS settings (global, same store as tournament)
+  const ttsEnabled = useSettingsStore(s => s.ttsEnabled);
+  const setTtsEnabled = useSettingsStore(s => s.setTtsEnabled);
+  const ttsProvider = useSettingsStore(s => s.ttsProvider);
+  const setTtsProvider = useSettingsStore(s => s.setTtsProvider);
+  const ttsCloudApiKey = useSettingsStore(s => s.ttsCloudApiKey);
+  const setTtsCloudApiKey = useSettingsStore(s => s.setTtsCloudApiKey);
+  const ttsCloudVoice = useSettingsStore(s => s.ttsCloudVoice);
+  const setTtsCloudVoice = useSettingsStore(s => s.setTtsCloudVoice);
+  const ttsVoice = useSettingsStore(s => s.ttsVoice);
+  const setTtsVoice = useSettingsStore(s => s.setTtsVoice);
+  const ttsVolume = useSettingsStore(s => s.ttsVolume);
+  const setTtsVolume = useSettingsStore(s => s.setTtsVolume);
+  const ttsPort = useSettingsStore(s => s.ttsPort);
+  const [ttsStatus, setTtsStatus] = useState<'unknown' | 'online' | 'offline'>('unknown');
+
+  useEffect(() => {
+    if (!ttsEnabled) { setTtsStatus('unknown'); return; }
+    if (ttsProvider === 'local') {
+      void checkTtsHealth(ttsPort).then(s => setTtsStatus(s.running ? 'online' : 'offline'));
+    } else {
+      setTtsStatus(ttsCloudApiKey ? 'online' : 'offline');
+    }
+  }, [ttsEnabled, ttsProvider, ttsCloudApiKey, ttsPort]);
 
   const patchCommentator = useCallback((updates: Record<string, unknown>) => {
     setReplayCommentatorModel({
@@ -50,7 +81,7 @@ export function PgnImport() {
         id: '', name: '',
         mode: 'oracle' as const,
         reasoningEffort: 'high' as const,
-        maxTokens: 1000,
+        maxTokens: 16000,
         stockfishDepth: 18,
       }),
       ...updates,
@@ -251,18 +282,127 @@ export function PgnImport() {
                 </button>
               ))}
             </div>
-            {/* Oracle depth */}
-            {commentatorMode === 'oracle' && (
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs text-text-muted">SF Depth:</span>
+            {/* Tokens + SF Depth row */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs text-text-muted">Tokens:</span>
+              <select
+                value={commentatorTokens}
+                onChange={(e) => patchCommentator({ maxTokens: Number(e.target.value) })}
+                className="bg-surface-2 text-text-primary text-xs rounded px-1.5 py-0.5 border border-border"
+              >
+                {REPLAY_TOKEN_PRESETS.map(t => (
+                  <option key={t} value={t}>{t >= 1000 ? `${t / 1000}k` : t}</option>
+                ))}
+              </select>
+              {commentatorMode === 'oracle' && (
+                <>
+                  <span className="text-xs text-text-muted ml-1">SF Depth:</span>
+                  <select
+                    value={commentatorDepth}
+                    onChange={(e) => patchCommentator({ stockfishDepth: Number(e.target.value) })}
+                    className="bg-surface-2 text-text-primary text-xs rounded px-1.5 py-0.5 border border-border"
+                  >
+                    {COMMENTATOR_DEPTH_PRESETS.map(d => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+        {/* TTS Narration */}
+        {replayCommentatorModel?.id && (
+          <div className="mt-2 pt-2 border-t border-surface-2 space-y-2">
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setTtsEnabled(!ttsEnabled)}
+                className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                  ttsEnabled ? 'bg-purple-accent text-white' : 'bg-surface-2 text-text-muted hover:text-text-primary'
+                }`}
+              >
+                {ttsEnabled ? 'TTS ON' : 'TTS OFF'}
+              </button>
+              {ttsEnabled && (
+                <>
+                  <select
+                    value={ttsProvider}
+                    onChange={(e) => setTtsProvider(e.target.value as 'local' | 'qwen-cloud' | 'openai')}
+                    className="bg-surface-2 text-text-primary text-xs rounded px-2 py-1 border border-border"
+                  >
+                    <option value="qwen-cloud">Qwen Cloud (~100ms)</option>
+                    <option value="openai">OpenAI TTS (~300ms)</option>
+                    <option value="local">Local Sidecar (~13s)</option>
+                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-text-muted">Vol:</span>
+                    <input
+                      type="range" min="0" max="100"
+                      value={Math.round(ttsVolume * 100)}
+                      onChange={(e) => setTtsVolume(Number(e.target.value) / 100)}
+                      className="w-16 h-1 accent-purple-accent"
+                    />
+                  </div>
+                  {ttsStatus === 'online' && <span className="text-[10px] text-success">ready</span>}
+                  {ttsStatus === 'offline' && (
+                    <span className="text-[10px] text-warning">
+                      {ttsProvider === 'local' ? 'server offline' : 'needs API key'}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+            {ttsEnabled && ttsProvider !== 'local' && (
+              <div className="flex items-center gap-2">
+                <input
+                  type="password"
+                  placeholder={ttsProvider === 'qwen-cloud' ? 'DashScope API Key (sk-...)' : 'OpenAI API Key (sk-...)'}
+                  value={ttsCloudApiKey}
+                  onChange={(e) => setTtsCloudApiKey(e.target.value)}
+                  className="flex-1 bg-surface-2 text-text-primary text-xs rounded px-2 py-1 border border-border placeholder:text-text-muted"
+                />
                 <select
-                  value={commentatorDepth}
-                  onChange={(e) => patchCommentator({ stockfishDepth: Number(e.target.value) })}
-                  className="bg-surface-2 text-text-primary text-xs rounded px-1.5 py-0.5 border border-border"
+                  value={ttsCloudVoice}
+                  onChange={(e) => setTtsCloudVoice(e.target.value)}
+                  className="bg-surface-2 text-text-primary text-xs rounded px-2 py-1 border border-border"
                 >
-                  {COMMENTATOR_DEPTH_PRESETS.map(d => (
-                    <option key={d} value={d}>{d}</option>
-                  ))}
+                  {ttsProvider === 'qwen-cloud' ? (
+                    <>
+                      <option value="Chelsie">Chelsie (F, Narrator)</option>
+                      <option value="Cherry">Cherry (F, Warm)</option>
+                      <option value="Serena">Serena (F, Calm)</option>
+                      <option value="Ethan">Ethan (M, Deep)</option>
+                      <option value="Aiden">Aiden (M, Narrator)</option>
+                      <option value="River">River (M, Clear)</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="nova">Nova (Female)</option>
+                      <option value="shimmer">Shimmer (F, Warm)</option>
+                      <option value="alloy">Alloy (Neutral)</option>
+                      <option value="echo">Echo (Male)</option>
+                      <option value="fable">Fable (M, British)</option>
+                      <option value="onyx">Onyx (M, Deep)</option>
+                    </>
+                  )}
+                </select>
+              </div>
+            )}
+            {ttsEnabled && ttsProvider === 'local' && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-text-muted">Voice:</span>
+                <select
+                  value={ttsVoice}
+                  onChange={(e) => setTtsVoice(e.target.value)}
+                  className="bg-surface-2 text-text-primary text-xs rounded px-2 py-1 border border-border"
+                >
+                  <option value="Ryan">Ryan (Male)</option>
+                  <option value="Vivian">Vivian (Female)</option>
+                  <option value="Aria">Aria (Female)</option>
+                  <option value="Ethan">Ethan (Male)</option>
+                  <option value="Luna">Luna (Female)</option>
+                  <option value="Leo">Leo (Male)</option>
                 </select>
               </div>
             )}
