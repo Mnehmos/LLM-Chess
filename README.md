@@ -13,6 +13,21 @@ LLM-vs-LLM chess arena, tournament gauntlet, and benchmark app built with React,
 - **Exports** — PGN, CSV, JSON, and ZIP for single games, tournaments, and benchmark data.
 - **PGN Import & Replay** — Import PGN files and replay with live commentary and narration.
 
+## Match History Archive
+
+This repo now keeps exported match and tournament histories under [matches](./matches) so important runs are not stranded only in local `Downloads`.
+
+Current archived exports:
+
+- [Nemotron Super 120B Free vs 8 defenders, aborted gauntlet JSON](./matches/2026-03-13/gauntlet_Nemotron_Super_120B_Free_vs8_2026-03-13T03-26-03.json)
+- [Gemini 3.1 Pro Preview vs Stockfish 1500, single-game JSON](./matches/2026-03-13/Gemini_3_1_Pro_Preview_vs_Stockfish_1500_ELO_white_wins_checkmate_2026-03-13T18-54-24.json)
+
+The JSON exports include full move history, commentary text when present, stated model reasoning, timing, and token accounting fields.
+
+Important caveat:
+
+- Hidden provider chain-of-thought is only exportable when the provider actually exposes it. Today the app reliably stores the model's stated reasoning text plus numeric `reasoningTokens`, but it does not reconstruct or invent hidden reasoning-token content that the provider does not return.
+
 ## Requirements
 
 - Node.js `20.19+` (or `22.12+`), npm.

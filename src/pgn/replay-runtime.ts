@@ -33,7 +33,6 @@ export class ReplayRuntime {
   private black: PlayerConfig;
   private config: ReplayConfig;
   private listeners = new Set<GameEventListener>();
-  private streamListener: ((text: string, model: string) => void) | null = null;
   private sequence = 0;
   private aborted = false;
   private paused = false;
@@ -68,8 +67,8 @@ export class ReplayRuntime {
     return () => this.listeners.delete(listener);
   }
 
-  onStream(listener: (text: string, model: string) => void): void {
-    this.streamListener = listener;
+  onStream(_listener: (text: string, model: string) => void): void {
+    // Replay mode does not stream model tokens.
   }
 
   getState(): GameState {
@@ -156,7 +155,9 @@ export class ReplayRuntime {
       });
 
       // Apply move on our local board
-      const applied = chess.applyMove(move.san);
+      if (!chess.applyMove(move.san)) {
+        throw new Error(`Replay move could not be applied: ${move.san}`);
+      }
 
       // Emit MoveApplied with the same payload shape as GameRuntime
       this.emit({
@@ -232,27 +233,14 @@ export class ReplayRuntime {
     }
   }
 
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => {
-      const timer = setTimeout(resolve, ms);
-      // If aborted during delay, resolve immediately
-      const checkAbort = setInterval(() => {
-        if (this.aborted) {
-          clearTimeout(timer);
-          clearInterval(checkAbort);
-          resolve();
-        }
-      }, 50);
-      // Clean up interval when timer fires naturally
-      setTimeout(() => clearInterval(checkAbort), ms + 10);
-    });
-  }
 }
 
 // ─── Helpers ───
 
 function buildReplayPlayerConfig(name: string, color: 'w' | 'b'): PlayerConfig {
   return {
+    id: `replay-${color}-${name}`,
+    color,
     model: 'historical',
     displayName: name,
     temperature: 0,

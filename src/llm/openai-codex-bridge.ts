@@ -1,7 +1,7 @@
 import type { PlayerConfig, TurnContext } from '../engine/types';
 import type { LLMRawResponse } from './parser';
 import type { ChatMessage, CommentaryContext } from './prompts';
-import { buildChessPrompt, buildCommentaryPrompt, buildRetryPrompt } from './prompts';
+import { buildChessPrompt, buildCommentaryPrompt, buildRetryPrompt, buildRetryPromptForReason, type RetryReason } from './prompts';
 import { PermanentAPIError } from './errors';
 import type { MoveResponseOptions } from './client';
 
@@ -32,12 +32,14 @@ export class OpenAICodexBridgeClient {
   async requestMove(
     player: PlayerConfig,
     context: TurnContext,
-    previousIllegalMove?: string,
+    previousIllegalMove?: string | RetryReason,
     onToken?: (text: string) => void,
   ): Promise<LLMRawResponse> {
-    const messages: ChatMessage[] = previousIllegalMove
-      ? buildRetryPrompt(player, context, previousIllegalMove)
-      : buildChessPrompt(player, context);
+    const messages: ChatMessage[] = !previousIllegalMove
+      ? buildChessPrompt(player, context)
+      : typeof previousIllegalMove === 'string'
+        ? buildRetryPrompt(player, context, previousIllegalMove)
+        : buildRetryPromptForReason(player, context, previousIllegalMove);
 
     const result = await this.requestBridgeChat({
       model: player.model,

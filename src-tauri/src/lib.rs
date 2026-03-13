@@ -1,3 +1,4 @@
+mod catalog;
 mod tts;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -11,6 +12,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            catalog::load_puzzle_catalog,
             tts::start_tts_server,
             tts::stop_tts_server,
             tts::get_tts_status,

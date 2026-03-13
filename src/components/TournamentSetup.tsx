@@ -115,7 +115,8 @@ const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
 ];
 
 const TOKEN_PRESETS = [2000, 4000, 6000, 8000, 12000, 16000, 24000, 32000, 64000, 96000, 128000];
-const COMMENTATOR_TOKEN_PRESETS = [500, 1000, 2000, 4000];
+const COMMENTATOR_TOKEN_PRESETS = [500, 1000, 2000, 4000, 8000, 12000, 16000];
+const PUZZLE_BREAK_TOKEN_PRESETS = [500, 1000, 2000, 4000];
 const COMMENTATOR_DEPTH_PRESETS = [8, 12, 15, 18, 20, 24];
 const COMMENTATOR_MODES: { value: CommentatorMode; label: string }[] = [
   { value: 'llm', label: 'LLM' },
@@ -201,6 +202,28 @@ export function TournamentSetup() {
   const setTtsVolume = useSettingsStore(s => s.setTtsVolume);
   const ttsPort = useSettingsStore(s => s.ttsPort);
   const [ttsStatus, setTtsStatus] = useState<'unknown' | 'online' | 'offline'>('unknown');
+  // Filler / Stream Info settings
+  const fillerEnabled = useSettingsStore(s => s.fillerEnabled);
+  const setFillerEnabled = useSettingsStore(s => s.setFillerEnabled);
+  const channelName = useSettingsStore(s => s.channelName);
+  const setChannelName = useSettingsStore(s => s.setChannelName);
+  const channelWebsite = useSettingsStore(s => s.channelWebsite);
+  const setChannelWebsite = useSettingsStore(s => s.setChannelWebsite);
+  const channelDonationUrl = useSettingsStore(s => s.channelDonationUrl);
+  const setChannelDonationUrl = useSettingsStore(s => s.setChannelDonationUrl);
+  const channelCustomPlugLines = useSettingsStore(s => s.channelCustomPlugLines);
+  const setChannelCustomPlugLines = useSettingsStore(s => s.setChannelCustomPlugLines);
+  // Puzzle Break settings
+  const puzzleBreakEnabled = useSettingsStore(s => s.puzzleBreakEnabled);
+  const setPuzzleBreakEnabled = useSettingsStore(s => s.setPuzzleBreakEnabled);
+  const puzzleBreakThresholdMs = useSettingsStore(s => s.puzzleBreakThresholdMs);
+  const setPuzzleBreakThresholdMs = useSettingsStore(s => s.setPuzzleBreakThresholdMs);
+  const puzzleBreakModel = useSettingsStore(s => s.puzzleBreakModel);
+  const setPuzzleBreakModel = useSettingsStore(s => s.setPuzzleBreakModel);
+  const puzzleBreakReasoningEffort = useSettingsStore(s => s.puzzleBreakReasoningEffort);
+  const setPuzzleBreakReasoningEffort = useSettingsStore(s => s.setPuzzleBreakReasoningEffort);
+  const puzzleBreakMaxTokens = useSettingsStore(s => s.puzzleBreakMaxTokens);
+  const setPuzzleBreakMaxTokens = useSettingsStore(s => s.setPuzzleBreakMaxTokens);
 
   useEffect(() => {
     if (!ttsEnabled) { setTtsStatus('unknown'); return; }
@@ -610,6 +633,139 @@ export function TournamentSetup() {
                 </select>
               </div>
             )}
+          </div>
+        )}
+      </Section>
+
+      {/* Filler / Stream Info */}
+      <Section title="Dead Air Filler">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs text-text-muted">Generate filler commentary during long thinking pauses</span>
+          <button
+            type="button"
+            onClick={() => setFillerEnabled(!fillerEnabled)}
+            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+              fillerEnabled ? 'bg-purple-accent/20 text-purple-light' : 'bg-surface-2 text-text-muted hover:text-text-primary'
+            }`}
+          >
+            {fillerEnabled ? 'ON' : 'OFF'}
+          </button>
+        </div>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-text-muted w-24 flex-shrink-0">Channel name</span>
+            <input
+              type="text"
+              value={channelName}
+              onChange={e => setChannelName(e.target.value)}
+              placeholder="e.g. LLM Chess Arena"
+              className="flex-1 px-2 py-1 rounded bg-surface-2 border border-surface-3 text-xs text-text-primary"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-text-muted w-24 flex-shrink-0">Website</span>
+            <input
+              type="text"
+              value={channelWebsite}
+              onChange={e => setChannelWebsite(e.target.value)}
+              placeholder="https://..."
+              className="flex-1 px-2 py-1 rounded bg-surface-2 border border-surface-3 text-xs text-text-primary"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-text-muted w-24 flex-shrink-0">Donation URL</span>
+            <input
+              type="text"
+              value={channelDonationUrl}
+              onChange={e => setChannelDonationUrl(e.target.value)}
+              placeholder="https://..."
+              className="flex-1 px-2 py-1 rounded bg-surface-2 border border-surface-3 text-xs text-text-primary"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-muted">Custom plug lines (one per line)</span>
+            <textarea
+              value={channelCustomPlugLines}
+              onChange={e => setChannelCustomPlugLines(e.target.value)}
+              placeholder={"Join our Discord!\nNew match every hour"}
+              rows={3}
+              className="w-full px-2 py-1 rounded bg-surface-2 border border-surface-3 text-xs text-text-primary resize-none"
+            />
+          </div>
+          <p className="text-[10px] text-text-muted">Channel info is woven into commentary during natural pauses and channel plugs. Filler fires after 10+ second thinking pauses.</p>
+        </div>
+      </Section>
+
+      {/* Puzzle Break */}
+      <Section title="Puzzle Break">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs text-text-muted">Show a live chess puzzle when an LLM thinks too long</span>
+          <button
+            type="button"
+            onClick={() => setPuzzleBreakEnabled(!puzzleBreakEnabled)}
+            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+              puzzleBreakEnabled ? 'bg-amber-500/20 text-amber-300' : 'bg-surface-2 text-text-muted hover:text-text-primary'
+            }`}
+          >
+            {puzzleBreakEnabled ? 'ON' : 'OFF'}
+          </button>
+        </div>
+        {puzzleBreakEnabled && (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-text-muted w-20">Threshold</span>
+              <input
+                type="number"
+                min={5}
+                max={300}
+                step={5}
+                value={puzzleBreakThresholdMs / 1000}
+                onChange={e => setPuzzleBreakThresholdMs(Number(e.target.value) * 1000)}
+                className="w-16 px-2 py-0.5 rounded bg-surface-2 border border-surface-3 text-xs text-text-primary"
+              />
+              <span className="text-[11px] text-text-muted">seconds</span>
+            </div>
+            <ModelSelector
+              label="Puzzle model"
+              value={puzzleBreakModel}
+              onChange={(id) => setPuzzleBreakModel(id)}
+            />
+            {puzzleBreakModel && (
+              <div className="flex gap-3 items-center flex-wrap">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-text-muted">Reasoning:</span>
+                  <div className="flex gap-0.5">
+                    {REASONING_EFFORTS.map(re => (
+                      <button
+                        key={re.value}
+                        type="button"
+                        onClick={() => setPuzzleBreakReasoningEffort(re.value)}
+                        className={`px-1.5 py-0.5 rounded text-xs transition-colors ${
+                          puzzleBreakReasoningEffort === re.value
+                            ? 'bg-amber-500/30 text-amber-300'
+                            : 'bg-surface-2 text-text-muted hover:text-text-secondary'
+                        }`}
+                      >
+                        {re.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-text-muted">Tokens:</span>
+                  <select
+                    value={puzzleBreakMaxTokens}
+                    onChange={e => setPuzzleBreakMaxTokens(Number(e.target.value))}
+                    className="bg-surface-2 text-text-primary text-xs rounded px-2 py-1 border border-border"
+                  >
+                    {PUZZLE_BREAK_TOKEN_PRESETS.map(t => (
+                      <option key={t} value={t}>{t >= 1000 ? `${(t / 1000).toFixed(0)}k` : t}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
+            <p className="text-[10px] text-text-muted">Requires Livestream mode. Uses the same provider as the main game. Puzzle fetched from Lichess.org (falls back to offline puzzles).</p>
           </div>
         )}
       </Section>

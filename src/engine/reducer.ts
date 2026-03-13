@@ -36,6 +36,7 @@ export function gameReducer(state: GameState, event: GameEvent): GameState {
           event.payload.black,
           event.payload.initialFen,
         ),
+        moveHistory: event.payload.priorMoveHistory ? [...event.payload.priorMoveHistory] : [],
         startedAt: event.timestamp,
         eventLog: [event],
       };
@@ -100,6 +101,7 @@ export function gameReducer(state: GameState, event: GameEvent): GameState {
             toolInvocations: event.payload.toolInvocations,
             scratchpadState: event.payload.scratchpadState,
             benchmarkFraming: event.payload.benchmarkFraming,
+            illegalMovesAttempted: event.payload.illegalMovesAttempted,
             attackActive: event.payload.attackActive,
             activeAttackVectors: event.payload.activeAttackVectors,
             attackPattern: event.payload.attackPattern,

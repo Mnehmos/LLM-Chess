@@ -1,4 +1,4 @@
-import { getStockfish } from '../chess/stockfish';
+import { getStockfishPlayer } from '../chess/stockfish';
 import { buildStockfishStrengthProfile, MAX_STOCKFISH_ELO } from '../chess/stockfish-strength';
 import type { PlayerConfig, TurnContext } from './types';
 
@@ -17,7 +17,7 @@ export async function requestStockfishMove(
   player: PlayerConfig,
   context: TurnContext,
 ): Promise<StockfishMoveResult> {
-  const sf = getStockfish();
+  const sf = getStockfishPlayer();
   if (!sf.isReady()) await sf.init();
 
   const elo = player.stockfishElo || 2000;

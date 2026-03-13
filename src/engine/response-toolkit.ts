@@ -1,5 +1,5 @@
 import type { GraduatedResponseConfig, ResponseToolInvocation, ResponseToolLevel } from './types';
-import { getStockfish } from '../chess/stockfish';
+import { getStockfishAnalysis } from '../chess/stockfish';
 
 /**
  * Graduated Response Toolkit — 5 levels of anomaly detection and escalation tools.
@@ -100,7 +100,7 @@ export function parseToolInvocations(
  * Returns an independent Stockfish evaluation to inject into the next prompt.
  */
 export async function processSecondOpinion(fen: string): Promise<string> {
-  const sf = getStockfish();
+  const sf = getStockfishAnalysis();
   if (!sf.isReady()) await sf.init();
 
   sf.resetStrength();

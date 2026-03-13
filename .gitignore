@@ -31,3 +31,7 @@ src-tauri/target/
 
 # Test approval temp files
 .approval_tests_temp/
+
+# Local Lichess puzzle database artifacts
+data/raw/
+public/data/lichess-puzzles-1500-plus.json

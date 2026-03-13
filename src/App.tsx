@@ -10,17 +10,27 @@ import { TournamentSetup } from './components/TournamentSetup';
 import { TournamentProgress } from './components/TournamentProgress';
 import { TournamentResults } from './components/TournamentResults';
 import { PgnImport } from './components/PgnImport';
+import { TechnicalDifficultiesOverlay } from './components/TechnicalDifficultiesOverlay';
 import { useTournamentStore } from './store/tournamentStore';
 import type { SavedTournament } from './engine/types';
 import { CommentaryQueue, type CommentaryEntry, type QueuedMove } from './commentary/commentaryQueue';
 import { createLLMClient } from './llm/client';
 import { isTauri, startTtsServer, stopTtsServer } from './tauri-bridge';
+import { Chess } from 'chess.js';
 
 type Tab = 'game' | 'leaderboard' | 'tournament' | 'replay';
 
 export function App() {
   const [tab, setTab] = useState<Tab>('game');
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showTechDiff, setShowTechDiff] = useState(false);
   const { gameState, isRunning } = useGameStore();
+
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
   const recordGame = useBenchmarkStore(s => s.recordGame);
   const initializeBenchmark = useBenchmarkStore(s => s.initialize);
   const commentatorModel = useGameStore(s => s.commentatorModel);
@@ -91,22 +101,33 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-surface-0">
-      {/* Header */}
-      <header className="border-b border-surface-2 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h1 className="text-xl font-bold text-text-primary">LLM Chess</h1>
-          <span className="text-xs text-text-muted bg-surface-2 px-2 py-0.5 rounded">Benchmark</span>
-        </div>
-        <nav className="flex gap-1">
-          <TabButton active={tab === 'game'} onClick={() => setTab('game')}>Game</TabButton>
-          <TabButton active={tab === 'tournament'} onClick={() => setTab('tournament')}>Tournament</TabButton>
-          <TabButton active={tab === 'replay'} onClick={() => setTab('replay')}>Replay</TabButton>
-          <TabButton active={tab === 'leaderboard'} onClick={() => setTab('leaderboard')}>Leaderboard</TabButton>
-        </nav>
-      </header>
+      {showTechDiff && <TechnicalDifficultiesOverlay onClose={() => setShowTechDiff(false)} />}
+
+      {/* Header — hidden when fullscreen (livestream mode) */}
+      {!isFullscreen && (
+        <header className="border-b border-surface-2 px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl font-bold text-text-primary">LLM Chess</h1>
+            <span className="text-xs text-text-muted bg-surface-2 px-2 py-0.5 rounded">Benchmark</span>
+            <button
+              onClick={() => setShowTechDiff(true)}
+              title="Technical Difficulties overlay"
+              className="text-xs text-text-muted bg-surface-2 hover:bg-surface-3 hover:text-yellow-300 px-2 py-0.5 rounded transition-colors"
+            >
+              📺 Tech Diff
+            </button>
+          </div>
+          <nav className="flex gap-1">
+            <TabButton active={tab === 'game'} onClick={() => setTab('game')}>Game</TabButton>
+            <TabButton active={tab === 'tournament'} onClick={() => setTab('tournament')}>Tournament</TabButton>
+            <TabButton active={tab === 'replay'} onClick={() => setTab('replay')}>Replay</TabButton>
+            <TabButton active={tab === 'leaderboard'} onClick={() => setTab('leaderboard')}>Leaderboard</TabButton>
+          </nav>
+        </header>
+      )}
 
       {/* Content */}
-      <main className="max-w-7xl mx-auto p-6">
+      <main className={`max-w-[1860px] mx-auto ${isFullscreen ? 'p-3' : 'p-6'}`}>
         {tab === 'game' && <GameTab gameState={gameState} lastMove={lastMove} />}
         {tab === 'tournament' && <TournamentTab />}
         {tab === 'replay' && <ReplayTab />}
@@ -125,11 +146,17 @@ function GameTab({ gameState, lastMove }: {
   const commentatorModel = useGameStore(s => s.commentatorModel);
   const stockfishEval = useGameStore(s => s.stockfishEval);
   const prevEvalCp = useGameStore(s => s.prevEvalCp);
+  const evalLog = useGameStore(s => s.evalLog);
+  const ttsEnabled = useSettingsStore(s => s.ttsEnabled);
   const provider = useSettingsStore(s => s.provider);
   const apiKey = useSettingsStore(s => s.apiKey);
   const ollamaBaseUrl = useSettingsStore(s => s.ollamaBaseUrl);
 
   const [commentaryEntries, setCommentaryEntries] = useState<CommentaryEntry[]>([]);
+  const [narrationMoveIndex, setNarrationMoveIndex] = useState(-1);
+  const [narrationSquares, setNarrationSquares] = useState<string[]>([]);
+  const [narrationArrows, setNarrationArrows] = useState<{ from: string; to: string; color: 'w' | 'b' }[]>([]);
+  const [narrationAnnotations, setNarrationAnnotations] = useState<import('./utils/board-annotations').BoardAnnotations | undefined>();
   const queueRef = useRef<CommentaryQueue | null>(null);
   const lastQueuedMoveCountRef = useRef(0);
   const gameIdRef = useRef<string | null>(null);
@@ -162,6 +189,7 @@ function GameTab({ gameState, lastMove }: {
       lastQueuedMoveCountRef.current = 0;
       queueRef.current?.reset();
       setCommentaryEntries([]);
+      setNarrationMoveIndex(-1);
     }
   }, [gameState?.gameId]);
 
@@ -173,16 +201,34 @@ function GameTab({ gameState, lastMove }: {
     const moveCount = gameState.moveHistory.length;
     if (moveCount <= lastQueuedMoveCountRef.current) return;
 
+    const created = gameState.eventLog.find((e: import('./engine/events').GameEvent) => e.type === 'GameCreated');
+    const initialFen = created?.type === 'GameCreated'
+      ? created.payload.initialFen
+      : 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const replay = new Chess(initialFen);
+    const fenBeforeByMove: string[] = [];
+    for (const historicalMove of gameState.moveHistory) {
+      fenBeforeByMove.push(replay.fen());
+      try {
+        replay.move(historicalMove.move);
+      } catch {
+        // Leave fallback handling to the enqueue payload below.
+      }
+    }
+
     for (let i = lastQueuedMoveCountRef.current; i < moveCount; i++) {
       const move = gameState.moveHistory[i];
+      const preMoveBestMove = evalLog[i]?.preMoveBestMove ?? undefined;
 
       let isCheck = false;
       let isCapture = false;
+      let moveFen = gameState.fen;
       for (let j = gameState.eventLog.length - 1; j >= 0; j--) {
         const evt = gameState.eventLog[j];
         if (evt.type === 'MoveApplied' && evt.payload.san === move.move) {
           isCheck = evt.payload.isCheck;
           isCapture = evt.payload.isCapture;
+          moveFen = evt.payload.fen;
           break;
         }
       }
@@ -192,35 +238,85 @@ function GameTab({ gameState, lastMove }: {
         move: move.move,
         color: move.color,
         turnNumber: move.turnNumber,
-        fen: gameState.fen,
+        fenBefore: fenBeforeByMove[i] ?? gameState.fen,
+        fen: moveFen,
         isCheck,
         isCapture,
         whiteModel: gameState.white.displayName,
         blackModel: gameState.black.displayName,
         moveHistory: gameState.moveHistory.slice(0, i + 1).map(m => m.move),
-        stockfishEval: stockfishEval ?? undefined,
-        prevEvalCp: prevEvalCp ?? undefined,
+        stockfishEval: evalLog[i]
+          ? {
+              scoreCp: evalLog[i].evalCp,
+              isMate: evalLog[i].isMate,
+              mateIn: evalLog[i].mateIn,
+              bestMove: evalLog[i].bestMove,
+              pv: evalLog[i].pv,
+              depth: evalLog[i].depth,
+            }
+          : (i === moveCount - 1 ? stockfishEval ?? undefined : undefined),
+        prevEvalCp: evalLog[i]?.preMoveEvalCp ?? (i === moveCount - 1 ? prevEvalCp ?? undefined : undefined),
+        preMoveBestMove,
+        preMoveBestMoveSan: preMoveBestMove
+          ? (uciToSan(fenBeforeByMove[i] ?? gameState.fen, preMoveBestMove) ?? undefined)
+          : undefined,
       };
       queueRef.current?.enqueue(item);
     }
     lastQueuedMoveCountRef.current = moveCount;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameState?.moveHistory.length, commentatorModel.id, stockfishEval, prevEvalCp, apiKey, provider]);
+  }, [gameState?.moveHistory.length, commentatorModel.id, stockfishEval, prevEvalCp, evalLog, apiKey, provider]);
 
-  // Resolve displayed FEN and lastMove based on stepper position
+  const handleNarrationStart = useCallback((maxMoveIndex: number, moves: { from: string; to: string; color: 'w' | 'b' }[]) => {
+    setNarrationMoveIndex((prev) => Math.max(prev, maxMoveIndex));
+    setNarrationArrows(moves);
+  }, []);
+
+  const handleNarrationSquares = useCallback((squares: string[], annotations: import('./utils/board-annotations').BoardAnnotations) => {
+    setNarrationSquares(squares);
+    setNarrationAnnotations(annotations);
+  }, []);
+
+  const effectiveMoveIndex = useMemo(() => {
+    if (viewingMoveIndex !== null) return viewingMoveIndex;
+    if (ttsEnabled) return narrationMoveIndex;
+    return null;
+  }, [narrationMoveIndex, ttsEnabled, viewingMoveIndex]);
+
+  // Resolve displayed FEN and lastMove based on narrator/stepper position
   const { displayFen, displayLastMove } = useMemo(() => {
     if (!gameState) return { displayFen: '', displayLastMove: lastMove };
-    if (viewingMoveIndex === null) return { displayFen: gameState.fen, displayLastMove: lastMove };
+    if (effectiveMoveIndex === null) return { displayFen: gameState.fen, displayLastMove: lastMove };
+    if (effectiveMoveIndex < 0) {
+      const created = gameState.eventLog.find((e: import('./engine/events').GameEvent) => e.type === 'GameCreated');
+      const initialFen = created?.type === 'GameCreated' ? created.payload.initialFen : 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+      return { displayFen: initialFen, displayLastMove: undefined };
+    }
 
     const moveEvents = gameState.eventLog.filter((e: import('./engine/events').GameEvent) => e.type === 'MoveApplied');
-    const target = moveEvents[viewingMoveIndex];
+    const target = moveEvents[effectiveMoveIndex];
     if (!target || target.type !== 'MoveApplied') return { displayFen: gameState.fen, displayLastMove: lastMove };
 
     return {
       displayFen: target.payload.fen,
       displayLastMove: { from: target.payload.from, to: target.payload.to },
     };
-  }, [gameState, viewingMoveIndex, lastMove]);
+  }, [effectiveMoveIndex, gameState, lastMove]);
+
+  const displayTurn = useMemo(() => {
+    if (!gameState) return 0;
+    if (effectiveMoveIndex === null) return gameState.currentTurn;
+    if (effectiveMoveIndex < 0) return 1;
+    return Math.floor(effectiveMoveIndex / 2) + 1;
+  }, [effectiveMoveIndex, gameState]);
+
+  const displayMoveCount = effectiveMoveIndex !== null ? Math.max(0, effectiveMoveIndex + 1) : undefined;
+  const activeHighlightSquares = viewingMoveIndex !== null ? undefined : narrationSquares;
+  const activeArrows = viewingMoveIndex !== null ? undefined : narrationArrows;
+  const activeAnnotations = viewingMoveIndex !== null ? undefined : narrationAnnotations;
+  const displayEval = effectiveMoveIndex !== null && gameState && effectiveMoveIndex < gameState.moveHistory.length - 1
+    ? undefined
+    : stockfishEval;
 
   return (
     <div className="flex flex-col gap-4">
@@ -234,9 +330,16 @@ function GameTab({ gameState, lastMove }: {
           lastMove={displayLastMove}
           commentaryEntries={commentaryEntries}
           commentatorModelName={commentatorModel.id ? commentatorModel.name : undefined}
-          stockfishEval={stockfishEval}
+          stockfishEval={displayEval}
           viewingMoveIndex={viewingMoveIndex}
           setViewingMoveIndex={setViewingMoveIndex}
+          displayTurn={displayTurn}
+          displayMoveCount={displayMoveCount}
+          onNarrationStart={handleNarrationStart}
+          onNarrationSquares={handleNarrationSquares}
+          highlightSquares={activeHighlightSquares}
+          arrows={activeArrows}
+          boardAnnotations={activeAnnotations}
           showHumanMoveInput
           showEventLog
         />
@@ -245,9 +348,18 @@ function GameTab({ gameState, lastMove }: {
   );
 }
 
+function uciToSan(fen: string, uci: string): string | null {
+  if (!/^[a-h][1-8][a-h][1-8][qrbn]?$/i.test(uci)) return null;
+  try {
+    const chess = new Chess(fen);
+    return chess.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4]?.toLowerCase() })?.san ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function TournamentTab() {
   const tournament = useTournamentStore(s => s.tournament);
-  const replayMode = useTournamentStore(s => s.replayMode);
   const tournaments = useTournamentStore(s => s.tournaments);
   const activeTournamentId = useTournamentStore(s => s.activeTournamentId);
   const parkTournament = useTournamentStore(s => s.parkTournament);

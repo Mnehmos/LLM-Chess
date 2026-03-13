@@ -1,4 +1,4 @@
-import { getStockfish } from '../chess/stockfish';
+import { getStockfishAnalysis } from '../chess/stockfish';
 import type { EvalResult } from '../chess/stockfish';
 import type { PlayerConfig, TurnContext } from './types';
 import type { LLMClient } from '../llm/client';
@@ -37,7 +37,7 @@ export async function requestOracleMove(
   llm: LLMClient,
   onToken?: (text: string) => void,
 ): Promise<OracleMoveResult> {
-  const sf = getStockfish();
+  const sf = getStockfishAnalysis();
   if (!sf.isReady()) await sf.init();
 
   const maxCorrections = player.oracleMaxCorrections || 2;

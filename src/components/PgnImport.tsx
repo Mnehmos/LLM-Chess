@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useTournamentStore } from '../store/tournamentStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { ModelSelector } from './ModelSelector';
@@ -34,6 +34,10 @@ const VERBOSITY_LEVELS: { value: CommentaryVerbosity; label: string; desc: strin
 export function PgnImport() {
   const [pgnText, setPgnText] = useState('');
   const [historicalContext, setHistoricalContext] = useState('');
+  const [startFromMove, setStartFromMove] = useState(1);
+  const startFromMoveRef = useRef(startFromMove);
+  // Keep ref in sync with state so handleStart always reads the latest value
+  startFromMoveRef.current = startFromMove;
   const [preview, setPreview] = useState<PgnGame | null>(null);
   const [parseError, setParseError] = useState('');
 
@@ -95,6 +99,7 @@ export function PgnImport() {
     try {
       const game = parseSinglePgn(pgnText);
       setPreview(game);
+      setStartFromMove(1);
     } catch (err) {
       setParseError(err instanceof Error ? err.message : 'Failed to parse PGN');
     }
@@ -121,7 +126,11 @@ export function PgnImport() {
 
   const handleStart = useCallback(() => {
     if (!pgnText.trim()) return;
-    startReplay(pgnText, { historicalContext: historicalContext || undefined, moveDelayMs: 0 });
+    // Use ref to always read latest startFromMove — immune to stale closure
+    const current = startFromMoveRef.current;
+    const startFromPly = current > 1 ? (current - 1) * 2 : 0;
+    console.log('[PgnImport] handleStart: startFromMove =', current, '→ startFromPly =', startFromPly);
+    startReplay(pgnText, { historicalContext: historicalContext || undefined, moveDelayMs: 0, startFromPly });
   }, [pgnText, historicalContext, startReplay]);
 
   // If replay is running, show stop controls
@@ -182,11 +191,26 @@ export function PgnImport() {
             <span>{preview.headers.white} vs {preview.headers.black}</span>
             {preview.headers.date && <span>{preview.headers.date}</span>}
           </div>
-          <div className="flex gap-4 text-xs text-text-muted">
+          <div className="flex items-center gap-4 text-xs text-text-muted">
             <span>{preview.moves.length} moves</span>
             <span>Result: {preview.headers.result}</span>
             {preview.headers.eco && <span>ECO: {preview.headers.eco}</span>}
             {preview.headers.opening && <span>{preview.headers.opening}</span>}
+            {/* Start from move picker — only shown when game has multiple moves */}
+            {preview.moves.length > 2 && (
+              <label className="flex items-center gap-1.5 ml-auto">
+                <span className="text-text-muted whitespace-nowrap">Start from move:</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={Math.ceil(preview.moves.length / 2)}
+                  value={startFromMove}
+                  onChange={(e) => setStartFromMove(Math.max(1, Math.min(Math.ceil(preview.moves.length / 2), Number(e.target.value) || 1)))}
+                  className="w-14 bg-surface-2 text-text-primary text-xs rounded px-1.5 py-0.5 border border-border text-center"
+                />
+                <span className="text-text-muted/60">/ {Math.ceil(preview.moves.length / 2)}</span>
+              </label>
+            )}
           </div>
         </div>
       )}

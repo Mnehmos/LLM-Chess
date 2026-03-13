@@ -13,6 +13,11 @@ EVALUATION RULES:
 - Only flag a move as significant if the eval changes by 1.0+ pawns in the wrong direction (blunder) or right direction (brilliant).
 - Do NOT exaggerate normal eval fluctuations.
 
+ENGINE CONTEXT LIMITATION:
+- You are NOT given a separate engine first choice for the side that just moved.
+- The engine move shown is only the best reply from the resulting position after the played move.
+- Never say a played move matched or missed the engine's first choice unless a separate pre-move alternative was explicitly provided.
+
 BOARD ANNOTATIONS — Draw on the board with inline tags:
 - [arrow e2 e4] — green arrow from e2 to e4
 - [arrow e2 e4 red] — colored arrow (green, red, yellow, blue, orange, purple, white, cyan)
@@ -20,7 +25,15 @@ BOARD ANNOTATIONS — Draw on the board with inline tags:
 - [highlight d5 red] — colored highlight
 - [circle f3] — circle a square (default blue)
 
-Use annotations to teach visually. Place tags at the END of sentences — text must read naturally if tags are removed. Tags are stripped from speech/display automatically.`;
+Use annotations to teach visually. Place tags at the END of sentences — text must read naturally if tags are removed. Tags are stripped from speech/display automatically.
+
+NATURAL-LANGUAGE ANNOTATION SCHEMA:
+- Prefer these exact forms when you want board geometry parsed from prose:
+  - "queen on d2", "knight on f5"
+  - "queen to d2", "bishop from c4 to d5"
+  - "pressure on f7", "targeting d6", "defending f7", "covering e4", "weak square e5"
+  - "line from d2 to h6", "diagonal c2 to h7", "file on e-file"
+- Keep prose natural, but use this vocabulary exactly when referring to concrete squares, routes, and targets.`;
 
 const BATCH_STYLE_RICH = `
 
@@ -28,7 +41,8 @@ COMMENTARY STYLE:
 - Cover each move briefly, then give deeper analysis on the most interesting or critical move in the batch.
 - Name openings/variations if still in book.
 - Explain strategic ideas and tactical motifs.
-- Compare to engine's best move when the played move differs significantly.
+- Use eval delta to judge move quality first. Use the resulting-position best reply only when it illuminates a concrete consequence.
+- Do not frame every move as "the engine preferred..." when only the resulting-position reply is available.
 
 FORMAT — Use rich Markdown:
 - Use **bold** for key terms and player names
@@ -47,7 +61,8 @@ COMMENTARY STYLE — Live spoken broadcast narration:
 
 FORMAT — Plain spoken text ONLY:
 - NO markdown (no bold, italics, code blocks, blockquotes)
-- ALWAYS use standard algebraic notation exactly as given (Nf3, Bxe5, O-O, e4). Never paraphrase as "knight to f3".
+- ALWAYS use standard algebraic notation exactly as given (Nf3, Bxe5, O-O, e4) for the actual moves played.
+- You MAY use the natural-language annotation schema for board ideas and geometry, such as "queen on d2" or "pressure on f7".
 - Filler commentary handles extended analysis between your move commentaries.`;
 
 const BATCH_VERBOSITY: Record<string, string> = {
@@ -138,8 +153,14 @@ export function buildBatchCommentaryPrompt(
 
       // Detailed analysis only for the last move in the batch
       if (isLast) {
-        parts.push(`Best line: ${m.stockfishEval.pv}`);
-        parts.push(`Engine best move: ${m.stockfishEval.bestMove} (depth ${m.stockfishEval.depth})`);
+        const nextMover = m.color === 'w' ? 'Black' : 'White';
+        parts.push(`Best continuation (principal variation): ${m.stockfishEval.pv}`);
+        if (m.preMoveBestMove) {
+          const preMoveLabel = m.preMoveBestMoveSan ? `${m.preMoveBestMoveSan} (${m.preMoveBestMove})` : m.preMoveBestMove;
+          parts.push(`Actual engine first choice from the BEFORE position: ${preMoveLabel}`);
+        }
+        parts.push(`Possible best reply from the resulting position: ${m.stockfishEval.bestMove} (depth ${m.stockfishEval.depth}) — this is ${nextMover}'s best response AFTER ${m.move} was played, not an alternative to it.`);
+        parts.push(`Use that reply only as consequence context, not as a claim about what the mover should have played instead.`);
       }
     }
 

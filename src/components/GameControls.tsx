@@ -61,7 +61,7 @@ const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
 ];
 
 const TOKEN_PRESETS = [2000, 4000, 6000, 8000, 12000, 16000, 24000, 32000, 64000, 96000, 128000];
-const COMMENTATOR_TOKEN_PRESETS = [500, 1000, 2000, 4000];
+const COMMENTATOR_TOKEN_PRESETS = [500, 1000, 2000, 4000, 8000, 12000, 16000];
 const COMMENTATOR_DEPTH_PRESETS = [8, 12, 15, 18, 20, 24];
 
 const COMMENTATOR_MODES: { value: CommentatorMode; label: string }[] = [

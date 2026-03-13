@@ -1,4 +1,5 @@
-import { getStockfish } from '../chess/stockfish';
+import { Chess } from 'chess.js';
+import { getStockfishAnalysis } from '../chess/stockfish';
 import type { EvalResult } from '../chess/stockfish';
 import type {
   AdvisorConfig, AdvisorVisibility, CorrectionLoopMode,
@@ -43,18 +44,34 @@ export async function getAdvisorMove(
   fen: string,
   config: AdvisorConfig,
 ): Promise<AdvisorResult> {
-  const sf = getStockfish();
+  const sf = getStockfishAnalysis();
   if (!sf.isReady()) await sf.init();
 
   const elo = config.stockfishElo ?? 2000;
   const depth = config.stockfishDepth ?? 12;
 
   // Get Stockfish recommendation at configured strength
+  // selectMove already resets strength atomically via postCommands — no need to call resetStrength()
   const advisorChoice = await sf.selectMove(fen, elo, depth);
-  const advisorMove = advisorChoice.bestMove;
+  const uciMove = advisorChoice.bestMove;
+
+  // Validate UCI move and convert to SAN using chess.js
+  // Stockfish returns UCI (e.g. "e2e4"); we need SAN for display and comparison.
+  // If the move is somehow illegal (stale queue, wrong position), fall back gracefully.
+  const chess = new Chess(fen);
+  const validated = uciMove ? chess.move(uciMove) : null;
+  if (!validated) {
+    const legalMoves = chess.moves();
+    const fallback = legalMoves[0] ?? '';
+    console.warn(`[Advisor] Stockfish returned illegal/empty UCI move "${uciMove}" for FEN: ${fen}. Falling back to "${fallback}"`);
+    const advisorMove = fallback;
+    const evalResult = await sf.evaluate(fen, depth);
+    const framedFeedback = frameAdvisorFeedback(advisorMove, evalResult, config);
+    return { advisorMove, eval: evalResult, framedFeedback, advisorElo: elo };
+  }
+  const advisorMove = validated.san;
 
   // Get evaluation at full strength for feedback
-  sf.resetStrength();
   const evalResult = await sf.evaluate(fen, depth);
 
   const framedFeedback = frameAdvisorFeedback(advisorMove, evalResult, config);

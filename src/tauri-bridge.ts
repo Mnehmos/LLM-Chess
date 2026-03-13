@@ -21,6 +21,16 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return tauriInvoke<T>(cmd, args);
 }
 
+export async function loadPuzzleCatalog(): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    return await invoke<string>('load_puzzle_catalog');
+  } catch (error) {
+    console.warn('[PuzzleBreak] Tauri catalog load failed', error);
+    return null;
+  }
+}
+
 /**
  * Start the TTS Python sidecar via Tauri.
  * Falls back to assuming the server is already running externally in browser mode.

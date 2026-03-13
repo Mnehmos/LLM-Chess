@@ -1,5 +1,5 @@
 import type { LinePredictionConfig, OutputFormat, PlayerConfig, PromptLevel, TurnContext, ReasoningOrder } from '../engine/types';
-import type { ChatMessage, CommentaryContext } from './prompts';
+import type { ChatMessage, CommentaryContext, RetryReason } from './prompts';
 import type { LLMRawResponse } from './parser';
 import { OpenRouterClient } from './openrouter';
 import { OpenAIClient } from './openai';
@@ -26,13 +26,17 @@ export interface MoveResponseOptions {
   outputFormat?: OutputFormat;
   promptLevel?: PromptLevel;
   linePrediction?: LinePredictionConfig;
+  maxTokens?: number;
+  reasoningEffort?: string;
 }
+
+export type { RetryReason } from './prompts';
 
 export interface LLMClient {
   requestMove(
     player: PlayerConfig,
     context: TurnContext,
-    previousIllegalMove?: string,
+    previousIllegalMove?: string | RetryReason,
     onToken?: (text: string) => void,
   ): Promise<LLMRawResponse>;
   requestMoveRaw(

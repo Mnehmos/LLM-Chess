@@ -2,11 +2,29 @@ import type { PlayerConfig, TurnContext } from '../engine/types';
 import type { MoveResponseOptions } from './client';
 import type { ChatMessage } from './prompts';
 import type { LLMRawResponse } from './parser';
-import { buildChessPrompt, buildRetryPrompt, buildCommentaryPrompt, type CommentaryContext } from './prompts';
+import { buildChessPrompt, buildRetryPrompt, buildRetryPromptForReason, buildCommentaryPrompt, type CommentaryContext, type RetryReason } from './prompts';
 import { buildResponseFormat, shouldStream, downgradeModel, buildReasoningParams, getAdaptiveMoveTokenBudget } from './model-capabilities';
 import { PermanentAPIError, RateLimitError } from './errors';
+import { StreamLoopGuard } from './stream-loop-guard';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+const MODEL_RATE_LIMIT_UNTIL = new Map<string, number>();
+
+function noteModelRateLimit(model: string, delayMs: number): void {
+  const until = Date.now() + Math.max(0, delayMs);
+  const current = MODEL_RATE_LIMIT_UNTIL.get(model) ?? 0;
+  if (until > current) {
+    MODEL_RATE_LIMIT_UNTIL.set(model, until);
+  }
+}
+
+async function waitForModelRateLimit(model: string): Promise<void> {
+  const until = MODEL_RATE_LIMIT_UNTIL.get(model) ?? 0;
+  const waitMs = until - Date.now();
+  if (waitMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
 
 export interface OpenRouterModel {
   id: string;
@@ -24,12 +42,14 @@ export class OpenRouterClient {
   async requestMove(
     player: PlayerConfig,
     context: TurnContext,
-    previousIllegalMove?: string,
+    previousIllegalMove?: string | RetryReason,
     onToken?: (text: string) => void,
   ): Promise<LLMRawResponse> {
-    const messages: ChatMessage[] = previousIllegalMove
-      ? buildRetryPrompt(player, context, previousIllegalMove)
-      : buildChessPrompt(player, context);
+    const messages: ChatMessage[] = !previousIllegalMove
+      ? buildChessPrompt(player, context)
+      : typeof previousIllegalMove === 'string'
+        ? buildRetryPrompt(player, context, previousIllegalMove)
+        : buildRetryPromptForReason(player, context, previousIllegalMove);
 
     const callWithRetry = async (overrides?: {
       onToken?: (text: string) => void;
@@ -59,6 +79,7 @@ export class OpenRouterClient {
         } catch (err) {
           if (err instanceof RateLimitError) {
             const delay = Math.min(1000 * Math.pow(2, attempt), 30000); // 1s, 2s, 4s, 8s, 16s (capped 30s)
+            noteModelRateLimit(player.model, delay);
             console.warn(`[OpenRouter] Rate limited (${player.model}) — retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
             await new Promise(r => setTimeout(r, delay));
             continue;
@@ -86,8 +107,11 @@ export class OpenRouterClient {
       result = await callWithRetry();
     }
 
-    if (needsOutputRecovery(result)) {
-      console.warn(`[OpenRouter] ${player.model} returned empty output (finish_reason=${result.finishReason}) - retrying with same reasoning profile`);
+    // Only retry here for reasoning models — they exhaust the hidden thinking budget.
+    // Non-reasoning models that return finish_reason=length are too verbose for the prompt;
+    // runtime will retry with a minimal prompt via RetryReason.empty, which is far more effective.
+    if (needsOutputRecovery(result) && buildReasoningParams(player.model, player.reasoningEffort)) {
+      console.warn(`[OpenRouter] ${player.model} returned empty output (finish_reason=${result.finishReason}) - retrying with expanded token budget`);
       const baseBudget = getAdaptiveMoveTokenBudget(player.model, player.maxTokens, player.reasoningEffort);
       const recoveryMaxTokens = Math.max(baseBudget, Math.min(18000, Math.round(baseBudget * 1.5)));
       result = await callWithRetry({
@@ -108,7 +132,28 @@ export class OpenRouterClient {
     responseOptions?: MoveResponseOptions,
     onToken?: (text: string) => void,
   ): Promise<LLMRawResponse> {
-    return this.callChat(model, messages, temperature, responseOptions, onToken);
+    let result = await this.callChat(
+      model,
+      messages,
+      temperature,
+      responseOptions,
+      onToken,
+      responseOptions?.maxTokens,
+      responseOptions?.reasoningEffort,
+    );
+    if (result.finishReason === 'loop_abort') {
+      console.warn(`[OpenRouter] Retrying ${model} once after loop_abort`);
+      result = await this.callChat(
+        model,
+        messages,
+        temperature,
+        responseOptions,
+        undefined,
+        responseOptions?.maxTokens,
+        responseOptions?.reasoningEffort,
+      );
+    }
+    return result;
   }
 
   private async callChat(
@@ -123,6 +168,7 @@ export class OpenRouterClient {
     if (!this.apiKey) {
       throw new PermanentAPIError(401, 'OpenRouter API key is missing. Set and save a valid key first.');
     }
+    await waitForModelRateLimit(model);
     const canStream = shouldStream(model);
     const isStreaming = !!onToken && canStream;
     const responseFormat = buildResponseFormat(
@@ -166,6 +212,12 @@ export class OpenRouterClient {
       const errorText = await response.text();
       // 429 rate limit — transient, should be retried with backoff
       if (response.status === 429) {
+        const retryAfterHeader = Number(response.headers.get('Retry-After') || '0');
+        if (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0) {
+          noteModelRateLimit(model, retryAfterHeader * 1000);
+        } else {
+          noteModelRateLimit(model, 1000);
+        }
         throw new RateLimitError(errorText);
       }
       // Other 4xx errors are permanent (model not found, auth, bad request) — don't retry
@@ -207,6 +259,8 @@ export class OpenRouterClient {
   ): Promise<LLMRawResponse> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
+    const reasoningLoopGuard = new StreamLoopGuard();
+    const contentLoopGuard = new StreamLoopGuard();
     let accumulated = '';
     let buffer = '';
     let finishReason = 'stop';
@@ -233,12 +287,32 @@ export class OpenRouterClient {
 
         try {
           const parsed = JSON.parse(data);
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
+          const choice = parsed.choices?.[0];
+          const deltaContent = choice?.delta?.content;
+          const deltaReasoning = choice?.delta?.reasoning;
+          if (deltaReasoning) {
+            // Thinking tokens — pass as-is so callers can show reasoning if desired
             if (ttftMs === undefined) ttftMs = Date.now() - startTime;
             lastTokenMs = Date.now();
-            accumulated += delta;
-            onToken(accumulated);
+            if (reasoningLoopGuard.push(deltaReasoning)) {
+              finishReason = 'loop_abort';
+              console.warn(`[OpenRouter] Aborting streamed response from ${model}: detected repetitive reasoning loop`);
+              await reader.cancel('loop_abort').catch(() => undefined);
+              break;
+            }
+            onToken('\u{1F9E0}' + deltaReasoning); // prefix 🧠 so callers can distinguish
+          }
+          if (deltaContent) {
+            if (ttftMs === undefined) ttftMs = Date.now() - startTime;
+            lastTokenMs = Date.now();
+            if (contentLoopGuard.push(deltaContent)) {
+              finishReason = 'loop_abort';
+              console.warn(`[OpenRouter] Aborting streamed response from ${model}: detected repetitive output loop`);
+              await reader.cancel('loop_abort').catch(() => undefined);
+              break;
+            }
+            accumulated += deltaContent;
+            onToken(deltaContent); // pass delta only, not accumulated
           }
           const reason = parsed.choices?.[0]?.finish_reason;
           if (reason) finishReason = reason;
@@ -253,6 +327,8 @@ export class OpenRouterClient {
           // Skip malformed chunks
         }
       }
+
+      if (finishReason === 'loop_abort') break;
     }
 
     const streamDurationMs = (ttftMs !== undefined && lastTokenMs !== undefined)
@@ -316,14 +392,16 @@ export class OpenRouterClient {
     try {
       const messages = buildCommentaryPrompt(ctx);
       const startTime = Date.now();
+      const reasoning = buildReasoningParams(commentatorModelId, options?.reasoningEffort);
       const body: Record<string, unknown> = {
         model: commentatorModelId,
         messages,
-        temperature: 0.8,
-        max_tokens: options?.maxTokens || 1000,
+        // Reasoning models require default temperature (1); non-reasoning models use 0.8
+        temperature: reasoning ? 1 : 0.8,
+        // Reasoning models need extra headroom for hidden thinking tokens
+        max_tokens: options?.maxTokens ?? (reasoning ? 4000 : 1000),
         stream: true,
       };
-      const reasoning = buildReasoningParams(commentatorModelId, options?.reasoningEffort);
       if (reasoning) body.reasoning = reasoning;
 
       const response = await fetch(`${OPENROUTER_BASE}/chat/completions`, {

@@ -1,10 +1,11 @@
 import type { PlayerConfig, TurnContext } from '../engine/types';
 import type { LLMRawResponse } from './parser';
 import type { ChatMessage } from './prompts';
-import { buildChessPrompt, buildCommentaryPrompt, buildRetryPrompt, type CommentaryContext } from './prompts';
+import { buildChessPrompt, buildCommentaryPrompt, buildRetryPrompt, buildRetryPromptForReason, type CommentaryContext, type RetryReason } from './prompts';
 import { buildReasoningParams, buildResponseFormat, downgradeModel, getAdaptiveMoveTokenBudget, shouldStream } from './model-capabilities';
 import { PermanentAPIError, RateLimitError } from './errors';
 import type { LLMModel, MoveResponseOptions } from './client';
+import { StreamLoopGuard } from './stream-loop-guard';
 
 const OPENAI_BASE = 'https://api.openai.com/v1';
 
@@ -24,12 +25,14 @@ export class OpenAIClient {
   async requestMove(
     player: PlayerConfig,
     context: TurnContext,
-    previousIllegalMove?: string,
+    previousIllegalMove?: string | RetryReason,
     onToken?: (text: string) => void,
   ): Promise<LLMRawResponse> {
-    const messages: ChatMessage[] = previousIllegalMove
-      ? buildRetryPrompt(player, context, previousIllegalMove)
-      : buildChessPrompt(player, context);
+    const messages: ChatMessage[] = !previousIllegalMove
+      ? buildChessPrompt(player, context)
+      : typeof previousIllegalMove === 'string'
+        ? buildRetryPrompt(player, context, previousIllegalMove)
+        : buildRetryPromptForReason(player, context, previousIllegalMove);
 
     const callWithRetry = async (overrides?: {
       onToken?: (text: string) => void;
@@ -116,7 +119,28 @@ export class OpenAIClient {
     responseOptions?: MoveResponseOptions,
     onToken?: (text: string) => void,
   ): Promise<LLMRawResponse> {
-    return this.callChat(model, messages, temperature, responseOptions, onToken);
+    let result = await this.callChat(
+      model,
+      messages,
+      temperature,
+      responseOptions,
+      onToken,
+      responseOptions?.maxTokens,
+      responseOptions?.reasoningEffort,
+    );
+    if (result.finishReason === 'loop_abort') {
+      console.warn(`[OpenAI] Retrying ${model} once after loop_abort`);
+      result = await this.callChat(
+        model,
+        messages,
+        temperature,
+        responseOptions,
+        undefined,
+        responseOptions?.maxTokens,
+        responseOptions?.reasoningEffort,
+      );
+    }
+    return result;
   }
 
   private async callChat(
@@ -216,6 +240,7 @@ export class OpenAIClient {
   ): Promise<LLMRawResponse> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
+    const contentLoopGuard = new StreamLoopGuard();
     let accumulated = '';
     let buffer = '';
     let finishReason = 'stop';
@@ -249,6 +274,12 @@ export class OpenAIClient {
             lastTokenMs = Date.now();
             accumulated += delta;
             onToken(accumulated);
+            if (contentLoopGuard.push(delta)) {
+              finishReason = 'loop_abort';
+              console.warn(`[OpenAI] Aborting streamed response from ${model}: detected repetitive token loop`);
+              await reader.cancel('loop_abort').catch(() => undefined);
+              break;
+            }
           }
           const reason = parsed.choices?.[0]?.finish_reason;
           if (reason) finishReason = reason;
@@ -262,6 +293,8 @@ export class OpenAIClient {
           // Skip malformed chunks.
         }
       }
+
+      if (finishReason === 'loop_abort') break;
     }
 
     const streamDurationMs = (ttftMs !== undefined && lastTokenMs !== undefined)
@@ -294,7 +327,7 @@ export class OpenAIClient {
     const body: Record<string, unknown> = {
       model: commentatorModelId,
       messages,
-      max_completion_tokens: options?.maxTokens || 1000,
+      max_completion_tokens: options?.maxTokens ?? (effort ? 4000 : 1000),
     };
     if (effort) {
       body.reasoning_effort = effort;
@@ -335,7 +368,8 @@ export class OpenAIClient {
       const body: Record<string, unknown> = {
         model: commentatorModelId,
         messages,
-        max_completion_tokens: options?.maxTokens || 1000,
+        // Reasoning models need extra headroom for hidden thinking tokens
+        max_completion_tokens: options?.maxTokens ?? (effort ? 4000 : 1000),
         stream: true,
       };
       if (effort) {

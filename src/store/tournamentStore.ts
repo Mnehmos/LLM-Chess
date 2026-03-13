@@ -2,10 +2,11 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { v4 as uuid } from 'uuid';
 import { GameRuntime } from '../engine/runtime';
+import { Chess } from 'chess.js';
 import { parseSinglePgn, pgnResultToGameResult } from '../pgn/parser';
-import { getHistoricalCommentatorPrompt } from '../llm/prompts';
 import type {
   CommentatorConfig,
+  EvalLogEntry,
   GameResult,
   GauntletTournamentConfig,
   GauntletTournamentState,
@@ -40,6 +41,54 @@ function autoName(config: GauntletTournamentConfig): string {
   return `${short} vs ${defCount} defender${defCount !== 1 ? 's' : ''} (${date})`;
 }
 
+function buildResumeSnapshot(
+  activeGameState: GameState | null,
+  resumeContext: ResumeContext | null,
+  activeResumeKey: string | null,
+): ResumeContext | null {
+  if (resumeContext) return resumeContext;
+  if (!activeGameState || activeGameState.moveHistory.length === 0) return null;
+  if (activeGameState.result?.outcome && activeGameState.result.outcome !== 'aborted') return null;
+  return {
+    fen: activeGameState.fen,
+    priorMoveHistory: activeGameState.moveHistory,
+    abortedKey: activeResumeKey || `snapshot-${activeGameState.gameId}`,
+  };
+}
+
+function getLatestEvalFromLog(
+  activeGameState: GameState | null,
+  evalLog: Record<number, EvalLogEntry>,
+): EvalResult | null {
+  if (!activeGameState || activeGameState.moveHistory.length === 0) return null;
+  const entry = evalLog[activeGameState.moveHistory.length - 1];
+  if (!entry) return null;
+  return {
+    scoreCp: entry.evalCp,
+    isMate: entry.isMate,
+    mateIn: entry.mateIn,
+    bestMove: entry.bestMove,
+    pv: entry.pv,
+    depth: entry.depth,
+  };
+}
+
+function hydratePersistedGameState(
+  activeGameState: GameState | null,
+  resumeContext: ResumeContext | null,
+): GameState | null {
+  if (!activeGameState) return null;
+  if (activeGameState.moveHistory.length > 0) return activeGameState;
+  const priorMoveHistory = resumeContext?.priorMoveHistory;
+  if (!priorMoveHistory || priorMoveHistory.length === 0) return activeGameState;
+  return {
+    ...activeGameState,
+    moveHistory: [...priorMoveHistory],
+    currentTurn: Math.floor(priorMoveHistory.length / 2) + 1,
+    currentColor: (priorMoveHistory.length % 2 === 0 ? 'w' : 'b') as 'w' | 'b',
+  };
+}
+
 interface TournamentStore {
   // Multi-tournament support
   tournaments: Record<string, SavedTournament>;
@@ -54,6 +103,8 @@ interface TournamentStore {
   waitingForStart: boolean;
   /** True when in PGN replay mode (not a tournament game). */
   replayMode: boolean;
+  /** Number of prior moves seeded into moveHistory before replay begins (commentary skips these). */
+  replayPriorMoveCount: number;
   /** Historical context string for replay commentary prompt. */
   replayHistoricalContext: string | null;
   /** Commentator model for replay mode (independent of tournament config). */
@@ -63,7 +114,7 @@ interface TournamentStore {
   streamingModel: string;
   commentary: string;
   commentaryLog: Record<number, string>;
-  evalLog: Record<number, { evalCp: number; isMate: boolean; mateIn: number | null; bestMove: string }>;
+  evalLog: Record<number, EvalLogEntry>;
   stockfishEval: EvalResult | null;
   prevEvalCp: number | null;
   autoPlay: boolean;
@@ -89,7 +140,7 @@ interface TournamentStore {
   resumeGame: (matchIndex: number, pairIndex: number, slotIndex: 0 | 1) => void;
 
   // Replay actions
-  startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number }) => void;
+  startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number; startFromPly?: number }) => void;
   stopReplay: () => void;
 
   // Multi-tournament actions
@@ -141,6 +192,7 @@ export const useTournamentStore = create<TournamentStore>()(
       isPaused: false,
       waitingForStart: false,
       replayMode: false,
+      replayPriorMoveCount: 0,
       replayHistoricalContext: null,
       replayCommentatorModel: null,
       setReplayCommentatorModel: (model) => set({ replayCommentatorModel: model }),
@@ -545,14 +597,16 @@ export const useTournamentStore = create<TournamentStore>()(
           tournament: updated,
           waitingForStart: true,
           activeRuntime: null,
-          activeGameState: null,
+          activeGameState: aborted.gameState,
           streamingText: '',
           streamingModel: '',
           commentary: '',
           commentaryLog: aborted.commentaryLog || {},
           evalLog: aborted.evalLog || {},
-          stockfishEval: null,
-          prevEvalCp: null,
+          stockfishEval: getLatestEvalFromLog(aborted.gameState, aborted.evalLog || {}),
+          prevEvalCp: aborted.gameState.moveHistory.length > 0
+            ? (aborted.evalLog?.[aborted.gameState.moveHistory.length - 1]?.preMoveEvalCp ?? null)
+            : null,
           viewingMoveIndex: null,
           abortedGames: updatedAborted,
           resumeContext: {
@@ -565,7 +619,7 @@ export const useTournamentStore = create<TournamentStore>()(
 
       // --- Replay actions ---
 
-      startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number }) => {
+      startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number; startFromPly?: number }) => {
         const { activeRuntime } = get();
         if (activeRuntime) {
           activeRuntime.abort('Starting replay');
@@ -573,8 +627,35 @@ export const useTournamentStore = create<TournamentStore>()(
         }
 
         const game = parseSinglePgn(pgn);
-        const replayMoves = game.moves.map(m => m.san);
+        const allMoves = game.moves.map(m => m.san);
         const replayResult = pgnResultToGameResult(game.headers.result) as GameResult;
+
+        // If startFromPly is set, fast-forward chess state and start narration mid-game.
+        console.log('[Replay] startFromPly received:', config.startFromPly, '→ total plies:', allMoves.length);
+        const startPly = Math.max(0, Math.min(config.startFromPly ?? 0, allMoves.length - 1));
+        console.log('[Replay] startPly resolved to:', startPly);
+        let startingFen = game.headers.fen;  // undefined = standard start
+        let priorMoveHistory: import('../engine/types').MoveRecord[] | undefined;
+
+        if (startPly > 0) {
+          const tempChess = new Chess(startingFen ?? undefined);
+          const priorSans: string[] = [];
+          for (let i = 0; i < startPly; i++) {
+            const result = tempChess.move(allMoves[i]);
+            if (result) priorSans.push(result.san);
+          }
+          startingFen = tempChess.fen();
+          console.log('[Replay] Fast-forwarded to FEN:', startingFen, '| moveNumber:', tempChess.moveNumber());
+          priorMoveHistory = priorSans.map((san, i) => ({
+            turnNumber: Math.floor(i / 2) + 1,
+            move: san,
+            color: (i % 2 === 0 ? 'w' : 'b') as 'w' | 'b',
+            thinkingTimeMs: 0,
+            attempts: 1,
+          }));
+        }
+
+        const replayMoves = allMoves.slice(startPly);
 
         // Build replay PlayerConfigs
         const white = {
@@ -607,7 +688,8 @@ export const useTournamentStore = create<TournamentStore>()(
         };
 
         const runtime = new GameRuntime(white, black, dummyLlmConfig, {
-          startingFen: game.headers.fen,
+          startingFen,
+          priorMoveHistory,
           replayMoves,
           replayResult,
         });
@@ -633,6 +715,7 @@ export const useTournamentStore = create<TournamentStore>()(
           activeRuntime: runtime,
           activeGameState: null,
           replayMode: true,
+          replayPriorMoveCount: priorMoveHistory?.length ?? 0,
           replayHistoricalContext: config.historicalContext || null,
           isRunning: true,
           isPaused: false,
@@ -649,8 +732,19 @@ export const useTournamentStore = create<TournamentStore>()(
 
         runtime.start()
           .then(async () => {
+            // Phase 1: wait for all in-flight commentary generation to complete.
+            // The audio queue can be temporarily empty between moves while commentary
+            // is still generating (especially with high token budgets), so we must
+            // drain the commentary queue BEFORE checking audio — otherwise
+            // waitUntilDone() resolves too early and the game ends prematurely.
+            if (_commentaryQueue) {
+              console.log('[Replay] Game ended — waiting for commentary generation to finish...');
+              await _commentaryQueue.waitUntilIdle();
+              console.log('[Replay] Commentary generation complete.');
+            }
+            // Phase 2: now wait for all queued audio to finish playing.
             if (_waitForNarration) {
-              console.log('[Replay] Game ended — waiting for narration to finish...');
+              console.log('[Replay] Waiting for narration to finish...');
               await _waitForNarration();
               console.log('[Replay] Narration complete.');
             }
@@ -672,6 +766,7 @@ export const useTournamentStore = create<TournamentStore>()(
             set({
               activeRuntime: null,
               isRunning: false,
+              replayPriorMoveCount: 0,
               streamingText: '',
               streamingModel: '',
             });
@@ -681,6 +776,7 @@ export const useTournamentStore = create<TournamentStore>()(
             set({
               activeRuntime: null,
               isRunning: false,
+              replayPriorMoveCount: 0,
               streamingText: '',
               streamingModel: '',
             });
@@ -706,7 +802,17 @@ export const useTournamentStore = create<TournamentStore>()(
       // --- Multi-tournament actions ---
 
       syncToMap: () => {
-        const { activeTournamentId, tournament, abortedGames, commentaryLog, evalLog, tournaments } = get();
+        const {
+          activeTournamentId,
+          tournament,
+          abortedGames,
+          commentaryLog,
+          evalLog,
+          tournaments,
+          activeGameState,
+          resumeContext,
+          activeResumeKey,
+        } = get();
         if (!activeTournamentId || !tournament) return;
         const updated = { ...tournaments };
         updated[activeTournamentId] = {
@@ -715,14 +821,27 @@ export const useTournamentStore = create<TournamentStore>()(
           abortedGames: { ...abortedGames },
           commentaryLog: { ...commentaryLog },
           evalLog: { ...evalLog },
+          activeGameState,
+          resumeContext: buildResumeSnapshot(activeGameState, resumeContext, activeResumeKey),
+          activeResumeKey,
           savedAt: Date.now(),
         };
         set({ tournaments: updated });
       },
 
       parkTournament: () => {
-        const { activeRuntime, tournament, activeTournamentId,
-                abortedGames, commentaryLog, evalLog, tournaments } = get();
+        const {
+          activeRuntime,
+          tournament,
+          activeTournamentId,
+          abortedGames,
+          commentaryLog,
+          evalLog,
+          tournaments,
+          activeGameState,
+          resumeContext,
+          activeResumeKey,
+        } = get();
         if (!tournament || !activeTournamentId) return;
 
         // Pause if running
@@ -735,6 +854,9 @@ export const useTournamentStore = create<TournamentStore>()(
           abortedGames: { ...abortedGames },
           commentaryLog: { ...commentaryLog },
           evalLog: { ...evalLog },
+          activeGameState,
+          resumeContext: buildResumeSnapshot(activeGameState, resumeContext, activeResumeKey),
+          activeResumeKey,
           savedAt: Date.now(),
           name: updated[activeTournamentId]?.name || autoName(tournament.config),
         };
@@ -772,6 +894,10 @@ export const useTournamentStore = create<TournamentStore>()(
 
         const saved = get().tournaments[id];
         if (!saved) return;
+        const hydratedActiveGameState = hydratePersistedGameState(
+          saved.activeGameState || null,
+          saved.resumeContext || null,
+        );
 
         set({
           activeTournamentId: id,
@@ -779,21 +905,23 @@ export const useTournamentStore = create<TournamentStore>()(
           abortedGames: saved.abortedGames,
           commentaryLog: saved.commentaryLog || {},
           evalLog: saved.evalLog || {},
+          activeGameState: hydratedActiveGameState,
           // Restore ephemeral flags
           isRunning: saved.state.status === 'running' || saved.state.status === 'paused',
           isPaused: saved.state.status === 'paused',
           waitingForStart: saved.state.status === 'running' || saved.state.status === 'paused',
           // Clear ephemeral game state
           activeRuntime: null,
-          activeGameState: null,
           streamingText: '',
           streamingModel: '',
           commentary: '',
-          stockfishEval: null,
-          prevEvalCp: null,
+          stockfishEval: getLatestEvalFromLog(hydratedActiveGameState, saved.evalLog || {}),
+          prevEvalCp: hydratedActiveGameState && hydratedActiveGameState.moveHistory.length > 0
+            ? (saved.evalLog?.[hydratedActiveGameState.moveHistory.length - 1]?.preMoveEvalCp ?? null)
+            : null,
           viewingMoveIndex: null,
-          resumeContext: null,
-          activeResumeKey: null,
+          resumeContext: saved.resumeContext || null,
+          activeResumeKey: saved.activeResumeKey || null,
         });
       },
 
@@ -867,6 +995,9 @@ export const useTournamentStore = create<TournamentStore>()(
               abortedGames: state.abortedGames || {},
               commentaryLog: {},
               evalLog: {},
+              activeGameState: null,
+              resumeContext: null,
+              activeResumeKey: null,
               savedAt: Date.now(),
               name: autoName(state.tournament.config),
             },
@@ -878,8 +1009,21 @@ export const useTournamentStore = create<TournamentStore>()(
         // Restore active tournament from map if activeTournamentId is set but tournament is null
         if (state.activeTournamentId && !state.tournament && state.tournaments[state.activeTournamentId]) {
           const saved = state.tournaments[state.activeTournamentId];
+          const hydratedActiveGameState = hydratePersistedGameState(
+            saved.activeGameState || null,
+            saved.resumeContext || null,
+          );
           state.tournament = saved.state;
           state.abortedGames = saved.abortedGames;
+          state.commentaryLog = saved.commentaryLog || {};
+          state.evalLog = saved.evalLog || {};
+          state.activeGameState = hydratedActiveGameState;
+          state.resumeContext = saved.resumeContext || null;
+          state.activeResumeKey = saved.activeResumeKey || null;
+          state.stockfishEval = getLatestEvalFromLog(hydratedActiveGameState, saved.evalLog || {});
+          state.prevEvalCp = hydratedActiveGameState && hydratedActiveGameState.moveHistory.length > 0
+            ? (saved.evalLog?.[hydratedActiveGameState.moveHistory.length - 1]?.preMoveEvalCp ?? null)
+            : null;
         }
 
         // After hydration, restore ephemeral flags from persisted tournament status
@@ -1105,14 +1249,14 @@ function runNextGame(llmConfig: LLMProviderConfig): void {
   const currentStore = useTournamentStore.getState();
   useTournamentStore.setState({
     activeRuntime: runtime,
-    activeGameState: null,
+    activeGameState: resumeContext ? currentStore.activeGameState : null,
     streamingText: '',
     streamingModel: '',
     commentary: '',
     commentaryLog: resumeContext ? currentStore.commentaryLog : {},
     evalLog: resumeContext ? currentStore.evalLog : {},
-    stockfishEval: null,
-    prevEvalCp: null,
+    stockfishEval: resumeContext ? currentStore.stockfishEval : null,
+    prevEvalCp: resumeContext ? currentStore.prevEvalCp : null,
     viewingMoveIndex: null,
     resumeContext: null,  // consumed
     activeResumeKey,
@@ -1171,10 +1315,10 @@ async function handleMoveApplied(state: GameState, event: GameEvent, _llmConfig:
   const useOracleDepth = !!commentatorModel?.id && commentatorMode === 'oracle';
   const evalDepth = useOracleDepth ? (commentatorModel?.stockfishDepth ?? 18) : 12;
 
-  const prevEvalCp = store.stockfishEval?.scoreCp ?? null;
   const expectedGameId = state.gameId;
   const expectedMoveCount = state.moveHistory.length;
   const expectedFen = state.fen;
+  const moveIdx = state.moveHistory.length - 1;
 
   // Run Stockfish eval — commentary is now handled by the CommentaryQueue in the component
   try {
@@ -1183,7 +1327,41 @@ async function handleMoveApplied(state: GameState, event: GameEvent, _llmConfig:
       try { await sf.init(); } catch { /* will skip eval if init fails */ }
     }
     if (sf.isReady()) {
+      const priorEntry = moveIdx > 0 ? useTournamentStore.getState().evalLog[moveIdx - 1] : undefined;
+      let preMoveEval: EvalResult | null = priorEntry
+        ? {
+            scoreCp: priorEntry.evalCp,
+            isMate: priorEntry.isMate,
+            mateIn: priorEntry.mateIn,
+            bestMove: priorEntry.bestMove,
+            pv: priorEntry.pv,
+            depth: priorEntry.depth,
+          }
+        : null;
+      if (!preMoveEval) {
+        const preFen = reconstructFenBeforeMove(state, moveIdx);
+        preMoveEval = await sf.evaluate(preFen, evalDepth);
+      }
       const evalResult = await sf.evaluate(state.fen, evalDepth);
+      const evalEntry: EvalLogEntry = {
+        evalCp: evalResult.scoreCp,
+        isMate: evalResult.isMate,
+        mateIn: evalResult.mateIn,
+        bestMove: evalResult.bestMove,
+        pv: evalResult.pv,
+        depth: evalResult.depth,
+        preMoveEvalCp: preMoveEval?.scoreCp ?? null,
+        preMoveIsMate: preMoveEval?.isMate,
+        preMoveMateIn: preMoveEval?.mateIn ?? null,
+        preMoveBestMove: preMoveEval?.bestMove,
+        preMovePv: preMoveEval?.pv,
+        preMoveDepth: preMoveEval?.depth,
+      };
+      const latestStore = useTournamentStore.getState();
+      const mergedEvalLog = {
+        ...latestStore.evalLog,
+        [moveIdx]: evalEntry,
+      };
       const latestAfterEval = useTournamentStore.getState().activeGameState;
       if (
         !latestAfterEval ||
@@ -1191,22 +1369,15 @@ async function handleMoveApplied(state: GameState, event: GameEvent, _llmConfig:
         latestAfterEval.moveHistory.length !== expectedMoveCount ||
         latestAfterEval.fen !== expectedFen
       ) {
+        useTournamentStore.setState({
+          evalLog: mergedEvalLog,
+        });
         return;
       }
-      const moveIdx = state.moveHistory.length - 1;
-      const prevEvalLog = useTournamentStore.getState().evalLog;
       useTournamentStore.setState({
         stockfishEval: evalResult,
-        prevEvalCp: prevEvalCp,
-        evalLog: {
-          ...prevEvalLog,
-          [moveIdx]: {
-            evalCp: evalResult.scoreCp,
-            isMate: evalResult.isMate,
-            mateIn: evalResult.mateIn,
-            bestMove: evalResult.bestMove,
-          },
-        },
+        prevEvalCp: preMoveEval?.scoreCp ?? null,
+        evalLog: mergedEvalLog,
       });
     }
   } catch (err) {
@@ -1227,10 +1398,10 @@ async function handleReplayMoveApplied(state: GameState, event: GameEvent): Prom
   const useOracleDepth = !!commentatorModel?.id && commentatorMode === 'oracle';
   const evalDepth = useOracleDepth ? (commentatorModel?.stockfishDepth ?? 18) : 12;
 
-  const prevEvalCp = store.stockfishEval?.scoreCp ?? null;
   const expectedGameId = state.gameId;
   const expectedMoveCount = state.moveHistory.length;
   const expectedFen = state.fen;
+  const moveIdx = state.moveHistory.length - 1;
 
   try {
     const sf = getStockfishEval();
@@ -1238,7 +1409,41 @@ async function handleReplayMoveApplied(state: GameState, event: GameEvent): Prom
       try { await sf.init(); } catch { /* will skip eval if init fails */ }
     }
     if (sf.isReady()) {
+      const priorEntry = moveIdx > 0 ? useTournamentStore.getState().evalLog[moveIdx - 1] : undefined;
+      let preMoveEval: EvalResult | null = priorEntry
+        ? {
+            scoreCp: priorEntry.evalCp,
+            isMate: priorEntry.isMate,
+            mateIn: priorEntry.mateIn,
+            bestMove: priorEntry.bestMove,
+            pv: priorEntry.pv,
+            depth: priorEntry.depth,
+          }
+        : null;
+      if (!preMoveEval) {
+        const preFen = reconstructFenBeforeMove(state, moveIdx);
+        preMoveEval = await sf.evaluate(preFen, evalDepth);
+      }
       const evalResult = await sf.evaluate(state.fen, evalDepth);
+      const evalEntry: EvalLogEntry = {
+        evalCp: evalResult.scoreCp,
+        isMate: evalResult.isMate,
+        mateIn: evalResult.mateIn,
+        bestMove: evalResult.bestMove,
+        pv: evalResult.pv,
+        depth: evalResult.depth,
+        preMoveEvalCp: preMoveEval?.scoreCp ?? null,
+        preMoveIsMate: preMoveEval?.isMate,
+        preMoveMateIn: preMoveEval?.mateIn ?? null,
+        preMoveBestMove: preMoveEval?.bestMove,
+        preMovePv: preMoveEval?.pv,
+        preMoveDepth: preMoveEval?.depth,
+      };
+      const latestStore = useTournamentStore.getState();
+      const mergedEvalLog = {
+        ...latestStore.evalLog,
+        [moveIdx]: evalEntry,
+      };
       const latestAfterEval = useTournamentStore.getState().activeGameState;
       if (
         !latestAfterEval ||
@@ -1246,27 +1451,36 @@ async function handleReplayMoveApplied(state: GameState, event: GameEvent): Prom
         latestAfterEval.moveHistory.length !== expectedMoveCount ||
         latestAfterEval.fen !== expectedFen
       ) {
+        useTournamentStore.setState({
+          evalLog: mergedEvalLog,
+        });
         return;
       }
-      const moveIdx = state.moveHistory.length - 1;
-      const prevEvalLog = useTournamentStore.getState().evalLog;
       useTournamentStore.setState({
         stockfishEval: evalResult,
-        prevEvalCp: prevEvalCp,
-        evalLog: {
-          ...prevEvalLog,
-          [moveIdx]: {
-            evalCp: evalResult.scoreCp,
-            isMate: evalResult.isMate,
-            mateIn: evalResult.mateIn,
-            bestMove: evalResult.bestMove,
-          },
-        },
+        prevEvalCp: preMoveEval?.scoreCp ?? null,
+        evalLog: mergedEvalLog,
       });
     }
   } catch (err) {
     console.warn('Stockfish eval failed (replay):', err);
   }
+}
+
+function reconstructFenBeforeMove(state: GameState, moveIdx: number): string {
+  const created = state.eventLog.find((event) => event.type === 'GameCreated');
+  const initialFen = created?.type === 'GameCreated'
+    ? created.payload.initialFen
+    : 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  const chess = new Chess(initialFen);
+  for (let i = 0; i < moveIdx; i++) {
+    try {
+      chess.move(state.moveHistory[i].move);
+    } catch {
+      break;
+    }
+  }
+  return chess.fen();
 }
 
 // Abort reasons from user-initiated actions — these should NOT be saved for resume

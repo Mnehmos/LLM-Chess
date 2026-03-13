@@ -39,6 +39,7 @@ export type EntryStartCallback = (maxMoveIndex: number, moves: NarrationMove[], 
 export class AudioNarrationQueue {
   private queue: QueueEntry[] = [];
   private playing = false;
+  private processingPromise: Promise<void> | null = null;
   private paused = false;
   private interrupted = false;
   private volume = 0.8;
@@ -108,6 +109,7 @@ export class AudioNarrationQueue {
           text: cleanSentence,
           spokenText: sanToSpoken(cleanSentence),
           synthOptions: { ...options.synthOptions },
+          // Preserve the legacy sentence-square signal that drives board focus.
           squares: extractChessSquares(cleanSentence),
           annotations,
           entryId: options.entryId,
@@ -116,9 +118,7 @@ export class AudioNarrationQueue {
         });
       }
     }
-    if (!this.playing) {
-      void this.processQueue();
-    }
+    this.ensureProcessing();
   }
 
   /**
@@ -142,9 +142,7 @@ export class AudioNarrationQueue {
         });
       }
     }
-    if (!this.playing) {
-      void this.processQueue();
-    }
+    this.ensureProcessing();
   }
 
   /**
@@ -182,7 +180,7 @@ export class AudioNarrationQueue {
   resume(): void {
     this.paused = false;
     if (!this.playing && this.queue.length > 0) {
-      void this.processQueue();
+      this.ensureProcessing();
     }
   }
 
@@ -193,6 +191,7 @@ export class AudioNarrationQueue {
     this._entryCount = 0;
     this._lastFiredEntryId = null;
     this.prefetchPromise = null;
+    this.processingPromise = null;
     if (this.currentSource) {
       try { this.currentSource.stop(); } catch { /* already stopped */ }
       this.currentSource = null;
@@ -249,9 +248,16 @@ export class AudioNarrationQueue {
     return this._deadAirGaps.length > 0 ? this._deadAirGaps[this._deadAirGaps.length - 1] : 0;
   }
 
-  private async processQueue(): Promise<void> {
+  private ensureProcessing(): void {
+    if (this.processingPromise || this.playing || this.paused || this.queue.length === 0) return;
     this.playing = true;
+    const run = this.processQueue();
+    this.processingPromise = run.finally(() => {
+      this.processingPromise = null;
+    });
+  }
 
+  private async processQueue(): Promise<void> {
     while (this.queue.length > 0 && !this.paused && !this.interrupted) {
       const entry = this.queue.shift()!;
 

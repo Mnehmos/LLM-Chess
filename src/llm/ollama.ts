@@ -2,7 +2,7 @@ import type { PlayerConfig, TurnContext } from '../engine/types';
 import type { LLMModel, MoveResponseOptions } from './client';
 import type { ChatMessage } from './prompts';
 import type { LLMRawResponse } from './parser';
-import { buildChessPrompt, buildRetryPrompt, buildCommentaryPrompt, type CommentaryContext } from './prompts';
+import { buildChessPrompt, buildRetryPrompt, buildRetryPromptForReason, buildCommentaryPrompt, type CommentaryContext, type RetryReason } from './prompts';
 import { buildResponseFormat, shouldStream, buildReasoningParams, getAdaptiveMoveTokenBudget } from './model-capabilities';
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
@@ -17,12 +17,14 @@ export class OllamaClient {
   async requestMove(
     player: PlayerConfig,
     context: TurnContext,
-    previousIllegalMove?: string,
+    previousIllegalMove?: string | RetryReason,
     onToken?: (text: string) => void,
   ): Promise<LLMRawResponse> {
-    const messages: ChatMessage[] = previousIllegalMove
-      ? buildRetryPrompt(player, context, previousIllegalMove)
-      : buildChessPrompt(player, context);
+    const messages: ChatMessage[] = !previousIllegalMove
+      ? buildChessPrompt(player, context)
+      : typeof previousIllegalMove === 'string'
+        ? buildRetryPrompt(player, context, previousIllegalMove)
+        : buildRetryPromptForReason(player, context, previousIllegalMove);
 
     const maxTokens = getAdaptiveMoveTokenBudget(player.model, player.maxTokens, player.reasoningEffort);
 

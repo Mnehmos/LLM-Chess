@@ -1,10 +1,19 @@
+import { useEffect, useRef } from 'react';
 import type { MoveRecord } from '../engine/types';
 
 interface MoveHistoryProps {
   moves: MoveRecord[];
+  activeIndex?: number;
 }
 
-export function MoveHistory({ moves }: MoveHistoryProps) {
+export function MoveHistory({ moves, activeIndex }: MoveHistoryProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const activeRowRef = useRef<HTMLTableRowElement>(null);
+
+  useEffect(() => {
+    activeRowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [activeIndex]);
+
   // Group moves into pairs (white + black per turn)
   const turns: Array<{ number: number; white?: MoveRecord; black?: MoveRecord }> = [];
 
@@ -33,7 +42,7 @@ export function MoveHistory({ moves }: MoveHistoryProps) {
   return (
     <div className="p-4 bg-surface-1 rounded-lg">
       <h3 className="text-sm font-semibold text-text-secondary mb-2">Moves</h3>
-      <div className="max-h-96 overflow-y-auto">
+      <div ref={containerRef} className="max-h-96 overflow-y-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-text-muted text-xs">
@@ -44,7 +53,13 @@ export function MoveHistory({ moves }: MoveHistoryProps) {
           </thead>
           <tbody>
             {turns.map((turn, i) => (
-              <tr key={i} className="border-t border-surface-2 hover:bg-surface-2/50">
+              <tr
+                key={i}
+                ref={i === turns.length - 1 ? activeRowRef : null}
+                className={`border-t border-surface-2 hover:bg-surface-2/50 ${
+                  activeIndex !== undefined && i === turns.length - 1 ? 'bg-purple-accent/10' : ''
+                }`}
+              >
                 <td className="py-1 text-text-muted">{turn.number}.</td>
                 <td className="py-1">
                   {turn.white && <MoveCell move={turn.white} />}

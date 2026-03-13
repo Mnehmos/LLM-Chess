@@ -1,10 +1,11 @@
 import type { EvalResult } from '../chess/stockfish';
 import type { CommentaryContext } from '../llm/prompts';
-import { VERBOSITY_TOKEN_MAP } from '../llm/prompts';
+import { buildCommentaryPrompt, VERBOSITY_TOKEN_MAP } from '../llm/prompts';
 import type { LLMClient } from '../llm/client';
 import type { CommentatorConfig } from '../engine/types';
 import { buildBatchCommentaryPrompt } from './batchPrompt';
 import { buildReasoningParams } from '../llm/model-capabilities';
+import { runResilientTextGeneration } from '../llm/resilient-text';
 import { pickFillerPrompt, type FillerCategory, type FillerContext, type ChannelInfo } from './fillerPrompts';
 import { parseAnnotations, type BoardAnnotations } from '../utils/board-annotations';
 
@@ -13,6 +14,9 @@ export interface QueuedMove {
   move: string;
   color: 'w' | 'b';
   turnNumber: number;
+  /** Position before this move was played. */
+  fenBefore?: string;
+  /** Live/current position after this move was played. */
   fen: string;
   isCheck: boolean;
   isCapture: boolean;
@@ -21,11 +25,20 @@ export interface QueuedMove {
   moveHistory: string[];
   stockfishEval?: EvalResult;
   prevEvalCp?: number;
+  preMoveBestMove?: string;
+  preMoveBestMoveSan?: string;
   /** How long the player took to make this move (ms). */
   thinkingTimeMs?: number;
   /** Source and destination squares for arrow drawing. */
   from?: string;
   to?: string;
+  /** Illegal moves the model tried before this legal move (≥2 means it struggled). */
+  illegalMovesAttempted?: string[];
+  /** True if this model's output format was downgraded from json_schema this session. */
+  formatDowngraded?: boolean;
+  /** Reasoning effort setting for each player — passed through for filler commentary context. */
+  whiteReasoningEffort?: string;
+  blackReasoningEffort?: string;
 }
 
 export interface CommentaryEntry {
@@ -42,6 +55,8 @@ export interface CommentaryEntry {
   isFiller?: boolean;
   /** Model-driven board annotations parsed from inline tags. */
   annotations?: BoardAnnotations;
+  /** Accumulated reasoning/thinking tokens from the model (🧠-prefixed, shown during streaming only). */
+  thinking?: string;
 }
 
 export interface CommentaryQueueConfig {
@@ -54,8 +69,20 @@ export interface CommentaryQueueConfig {
   getFillerEnabled?: () => boolean;
   /** Returns the number of queued audio entries (filler stops when backlog > 0). */
   getAudioBacklog?: () => number;
+  /** Returns true while narration audio is actively playing. */
+  getAudioPlaying?: () => boolean;
   /** Channel info for plug/donation fillers. */
   channelInfo?: ChannelInfo;
+  /** Returns true when puzzle break feature is enabled. */
+  getPuzzleBreakEnabled?: () => boolean;
+  /** Returns true while a puzzle break is currently mounted/open in the UI. */
+  getPuzzleBreakActive?: () => boolean;
+  /**
+   * Called by the filler system when a puzzle break should replace the next filler.
+   * Only fires when filler would normally fire AND the thinking model is using
+   * medium/high/xhigh reasoning effort (i.e. a genuine long thinker).
+   */
+  onPuzzleBreak?: () => void;
   /** Override the commentary system prompt (e.g. for historical replay narration). */
   systemPromptOverride?: string;
   /** Max moves per batch (1 = move-by-move narration for replay, undefined = batch all). */
@@ -126,9 +153,96 @@ function dynamicMaxTokens(
   const outputBudget = Math.min(800, Math.max(350, outputTokens));
 
   // Reasoning models burn thousands of tokens on thinking before output
-  if (isReasoning) return outputBudget + 2000;
+  if (isReasoning) return outputBudget + 6000;
 
   return outputBudget;
+}
+
+function trimMoveHistory(moveHistory: string[], maxMoves = 18): string[] {
+  return moveHistory.length <= maxMoves ? moveHistory : moveHistory.slice(-maxMoves);
+}
+
+function buildIntroFallback(ttsMode: boolean): string {
+  return ttsMode
+    ? 'We are live, the board is set, and the next move should arrive any moment.'
+    : 'The board is set and the broadcast is live. Commentary dropped for the opening beat, but the game is underway.';
+}
+
+function buildRecapFallback(
+  whiteModel: string,
+  blackModel: string,
+  result: string,
+  totalMoves: number,
+  ttsMode: boolean,
+): string {
+  return ttsMode
+    ? `${whiteModel} versus ${blackModel} is over. Result: ${result} after ${totalMoves} moves. The game reached a clear conclusion even though the full recap failed to generate.`
+    : `Post-game recap unavailable. Final result: ${whiteModel} vs ${blackModel}, ${result}, after ${totalMoves} moves.`;
+}
+
+function buildCommentaryFallback(batch: QueuedMove[], ttsMode: boolean): string {
+  if (batch.length === 0) {
+    return ttsMode
+      ? 'The game is still moving, but commentary dropped out for a moment.'
+      : 'Commentary temporarily unavailable, but the game state is still updating.';
+  }
+
+  if (batch.length === 1) {
+    const move = batch[0];
+    const mover = move.color === 'w' ? move.whiteModel : move.blackModel;
+    const suffix = [
+      move.isCapture ? 'It was a capture.' : '',
+      move.isCheck ? 'The move gives check.' : '',
+    ].filter(Boolean).join(' ');
+    return `${mover} played ${move.move}. ${suffix || 'The position has changed and the broadcast is catching up.'}`.trim();
+  }
+
+  const summary = batch
+    .map((move) => `${move.turnNumber}${move.color === 'w' ? 'w' : 'b'} ${move.move}`)
+    .join(', ');
+  return ttsMode
+    ? `Quick catch-up: ${summary}. The moves are in, and the game is continuing while commentary recovers.`
+    : `Commentary stalled during a multi-move batch. Moves covered: ${summary}.`;
+}
+
+function buildFillerFallback(ctx: FillerContext): string {
+  const model = ctx.thinkingModel ?? 'The model';
+  const lastMove = ctx.lastMove || 'the last move';
+  const elapsedSec = Math.max(0, Math.round((ctx.thinkingElapsedMs ?? 0) / 1000));
+  const variants = [
+    `${model} is still calculating after ${lastMove}. This looks like a genuine tank, not a routine move.`,
+    `${model} is still deep in the position after ${lastMove}, and the key question is which continuation actually holds together tactically.`,
+    `${model} has not moved yet after ${lastMove}, which usually means it is sorting through one sharp branch rather than choosing between cosmetic options.`,
+    `${model} is still working through the consequences of ${lastMove}. The board is stable for the moment, but the next decision clearly is not simple.`,
+  ];
+  const bucket = elapsedSec > 0 ? Math.floor(elapsedSec / 15) : 0;
+  return variants[bucket % variants.length];
+}
+
+function buildCompactCommentaryMessages(
+  ctx: CommentaryContext,
+  systemPromptOverride?: string,
+): import('../llm/prompts').ChatMessage[] {
+  return buildCommentaryPrompt({
+    ...ctx,
+    moveHistory: trimMoveHistory(ctx.moveHistory, 14),
+    prevCommentary: undefined,
+    qaHistory: undefined,
+    systemPromptOverride,
+  });
+}
+
+function buildCompactBatchMessages(
+  batch: QueuedMove[],
+  ttsMode: boolean,
+  systemPromptOverride?: string,
+  verbosity?: string,
+): import('../llm/prompts').ChatMessage[] {
+  const compactBatch = batch.map((move) => ({
+    ...move,
+    moveHistory: trimMoveHistory(move.moveHistory, 14),
+  }));
+  return buildBatchCommentaryPrompt(compactBatch, undefined, ttsMode, systemPromptOverride, verbosity);
 }
 
 export class CommentaryQueue {
@@ -160,12 +274,24 @@ export class CommentaryQueue {
   private fillerTimer: ReturnType<typeof setTimeout> | null = null;
   private fillerActive = false;
   private fillerAbort: AbortController | null = null;
+  private fillerWatchdog: ReturnType<typeof setInterval> | null = null;
+  private activeGenerationAbort: AbortController | null = null;
   private lastFillerCategory: FillerCategory | undefined;
+  private recentFillerCategories: FillerCategory[] = [];
+  private recentFillerTexts: string[] = [];
+  /** True while the puzzle break panel is open — prevents double-firing on repeated audio drain callbacks. */
+  private puzzleBreakActive = false;
   /** Snapshot of the last move for filler context. */
   private lastMoveSnapshot: QueuedMove | null = null;
+  /** Timestamp when the last move snapshot was recorded (used to compute thinking elapsed time). */
+  private lastMoveSnapshotAt = 0;
 
   constructor(config: CommentaryQueueConfig) {
     this.config = config;
+    this.fillerWatchdog = setInterval(() => {
+      if (this.destroyed) return;
+      this.scheduleFillerIfIdle();
+    }, 2000);
   }
 
   /** Dynamically set/clear the system prompt override (e.g. for historical replay narration). */
@@ -183,13 +309,22 @@ export class CommentaryQueue {
     this.config = { ...this.config, maxTokensOverride: tokens };
   }
 
+  async generateIntroSequence(introPrompts: string[]): Promise<void> {
+    for (let i = 0; i < introPrompts.length; i++) {
+      const prompt = introPrompts[i]?.trim();
+      if (!prompt) continue;
+      await this.generateIntro(prompt, { deferProcessNext: i < introPrompts.length - 1 });
+      if (this.destroyed) return;
+    }
+  }
+
   /**
    * Generate an introduction commentary entry before the first move.
    * For replays, this sets the historical stage. For tournaments, it introduces the matchup.
    * The intro is narrated via TTS like any other entry, with maxMoveIndex=-1 so the board
    * stays at the starting position.
    */
-  async generateIntro(introPrompt: string): Promise<void> {
+  async generateIntro(introPrompt: string, options?: { deferProcessNext?: boolean }): Promise<void> {
     if (this.destroyed) { console.log('[Commentary] generateIntro: queue destroyed'); return; }
     const model = this.config.getCommentatorModel();
     if (!model.id) { console.log('[Commentary] generateIntro: no model id'); return; }
@@ -210,10 +345,13 @@ export class CommentaryQueue {
     this.entries = [...this.entries, entry];
     const entryIndex = this.entries.length - 1;
     this.emit();
+    let abortCtrl: AbortController | null = null;
 
     try {
       const client = this.config.getClient();
       const ttsMode = this.config.getTtsMode?.() ?? false;
+      abortCtrl = new AbortController();
+      this.activeGenerationAbort = abortCtrl;
       const systemPrompt = this.config.systemPromptOverride || (
         ttsMode
           ? 'You are a chess broadcast host opening a live stream. Speak naturally and conversationally.'
@@ -225,19 +363,46 @@ export class CommentaryQueue {
         { role: 'user', content: introPrompt },
       ];
 
-      const raw = await client.requestMoveRaw(model.id, messages, 0.8, { promptLevel: 'p0' }, (partial) => {
-        this.updateEntryText(entryIndex, partial);
+      const introResult = await runResilientTextGeneration({
+        client,
+        model: model.id,
+        messages,
+        temperature: 0.8,
+        responseOptions: { promptLevel: 'p0', maxTokens: Math.max(model.maxTokens ?? 800, 800), reasoningEffort: model.reasoningEffort },
+        abortSignal: abortCtrl.signal,
+        onText: (text) => this.updateEntryText(entryIndex, text),
+        stallTimeoutMs: 30000,
+        hardTimeoutMs: 120000,
+        maxAttempts: 3,
       });
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
 
       // Clear active and complete, then process any queued moves
       this.active = null;
-      this.completeEntry(entryIndex, raw.content, true);
-      this.processNext();
+      this.completeEntry(entryIndex, introResult.text || buildIntroFallback(ttsMode), true);
+      if (!options?.deferProcessNext) {
+        this.processNext();
+      }
     } catch (err) {
+      if (abortCtrl?.signal.aborted) {
+        if (this.activeGenerationAbort === abortCtrl) {
+          this.activeGenerationAbort = null;
+        }
+        this.active = null;
+        return;
+      }
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
       this.active = null;
       const message = err instanceof Error ? err.message : String(err);
-      this.completeEntry(entryIndex, `(Intro error: ${message})`, true);
-      this.processNext();
+      console.warn('[Commentary] Intro failed:', message);
+      this.completeEntry(entryIndex, buildIntroFallback(this.config.getTtsMode?.() ?? false), true);
+      if (!options?.deferProcessNext) {
+        this.processNext();
+      }
     }
   }
 
@@ -277,32 +442,57 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
     this.entries = [...this.entries, entry];
     const entryIndex = this.entries.length - 1;
     this.emit();
+    let abortCtrl: AbortController | null = null;
 
     try {
       const client = this.config.getClient();
+      abortCtrl = new AbortController();
+      this.activeGenerationAbort = abortCtrl;
       const messages: import('../llm/prompts').ChatMessage[] = [
         { role: 'system', content: this.config.systemPromptOverride ?? `You are an expert chess commentator providing a post-game recap.${ttsMode ? ' Spoken natural language only, no markdown.' : ''}` },
         { role: 'user', content: recapPrompt },
       ];
       const verbosityTokens = model.verbosity ? VERBOSITY_TOKEN_MAP[model.verbosity] : undefined;
-      const raw = await client.requestMoveRaw(
-        model.id,
+      const recapResult = await runResilientTextGeneration({
+        client,
+        model: model.id,
         messages,
-        0.8,
-        { promptLevel: 'p0' },
-        (partial) => {
+        temperature: 0.8,
+        responseOptions: {
+          promptLevel: 'p0',
+          maxTokens: verbosityTokens ?? Math.max(model.maxTokens ?? 1000, 1000),
+          reasoningEffort: model.reasoningEffort,
+        },
+        abortSignal: abortCtrl.signal,
+        onText: (text) => {
           if (this.destroyed || entryIndex >= this.entries.length) return;
           const updated = [...this.entries];
-          updated[entryIndex] = { ...updated[entryIndex], text: partial, streaming: true };
+          updated[entryIndex] = { ...updated[entryIndex], text, streaming: true };
           this.entries = updated;
           this.emit();
         },
-      );
-      void verbosityTokens; // acknowledged — not passable via requestMoveRaw interface
-      this.completeEntry(entryIndex, raw.content);
+        stallTimeoutMs: 30000,
+        hardTimeoutMs: 120000,
+        maxAttempts: 3,
+      });
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
+      void verbosityTokens; // acknowledged - not passable via requestMoveRaw interface
+      this.completeEntry(entryIndex, recapResult.text || buildRecapFallback(whiteModel, blackModel, result, totalMoves, ttsMode));
     } catch (err) {
+      if (abortCtrl?.signal.aborted) {
+        if (this.activeGenerationAbort === abortCtrl) {
+          this.activeGenerationAbort = null;
+        }
+        return;
+      }
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
       const message = err instanceof Error ? err.message : String(err);
-      this.completeEntry(entryIndex, `(Recap error: ${message})`);
+      console.warn('[Commentary] Recap failed:', message);
+      this.completeEntry(entryIndex, buildRecapFallback(whiteModel, blackModel, result, totalMoves, ttsMode));
     }
   }
 
@@ -311,13 +501,43 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
     this.moveTimestamps.push(Date.now());
     this.pending.push(item);
     this.lastMoveSnapshot = item;
+    this.lastMoveSnapshotAt = Date.now();
     // Cancel any filler — real move takes priority
     this.cancelFiller();
     this.processNext();
   }
 
+  /**
+   * Seed dead-air tracking before the first move is made.
+   * Call this right after the intro commentary fires so the filler system
+   * starts its clock immediately — without it, fillers can't fire on turn 1.
+   *
+   * The synthetic snap uses color='b' so thinkingColor resolves to 'w' (White to move first).
+   */
+  seedPreMoveSnapshot(snap: Pick<QueuedMove, 'fen' | 'whiteModel' | 'blackModel' | 'whiteReasoningEffort' | 'blackReasoningEffort'>): void {
+    if (this.destroyed || this.lastMoveSnapshot) return; // don't overwrite a real snapshot
+    console.log('[Commentary] Seeding pre-move snapshot for dead air tracking (White to move)');
+    this.lastMoveSnapshot = {
+      moveIndex: -1,
+      move: '',
+      color: 'b', // last "mover" = black → thinkingColor resolves to white
+      turnNumber: 1,
+      fen: snap.fen,
+      isCheck: false,
+      isCapture: false,
+      whiteModel: snap.whiteModel,
+      blackModel: snap.blackModel,
+      moveHistory: [],
+      whiteReasoningEffort: snap.whiteReasoningEffort,
+      blackReasoningEffort: snap.blackReasoningEffort,
+    };
+    this.lastMoveSnapshotAt = Date.now();
+    this.scheduleFillerIfIdle();
+  }
+
   reset(): void {
     this.cancelFiller();
+    this.cancelActiveGeneration();
     this.pending = [];
     this.active = null;
     this.entries = [];
@@ -328,11 +548,37 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
     this.moveWaiters = [];
     this.lastMoveSnapshot = null;
     this.lastFillerCategory = undefined;
+    this.recentFillerCategories = [];
+    this.recentFillerTexts = [];
     this.emit();
+  }
+
+  /**
+   * Called by the audio layer when the narration queue fully drains (dead air begins).
+   * Re-triggers filler scheduling since the backlog check that blocked it is now clear.
+   */
+  notifyAudioDrained(): void {
+    console.log('[Commentary] Audio drained — re-checking filler/puzzle break eligibility');
+    this.scheduleFillerIfIdle();
+  }
+
+  /**
+   * Called when the puzzle break panel is dismissed or auto-closed.
+   * Clears the active flag so future dead air can trigger another puzzle break.
+   */
+  notifyPuzzleBreakDismissed(): void {
+    console.log('[PuzzleBreak] Panel dismissed — clearing active flag');
+    this.puzzleBreakActive = false;
+    this.scheduleFillerIfIdle();
   }
 
   destroy(): void {
     this.cancelFiller();
+    this.cancelActiveGeneration();
+    if (this.fillerWatchdog) {
+      clearInterval(this.fillerWatchdog);
+      this.fillerWatchdog = null;
+    }
     this.destroyed = true;
     this.pending = [];
     this.active = null;
@@ -402,6 +648,13 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
     }
   }
 
+  private cancelActiveGeneration(): void {
+    if (this.activeGenerationAbort) {
+      this.activeGenerationAbort.abort();
+      this.activeGenerationAbort = null;
+    }
+  }
+
   private processNext(): void {
     if (this.destroyed || this.active !== null || this.pending.length === 0) return;
 
@@ -429,6 +682,14 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
 
     const maxMoveIndex = Math.max(...batch.map(m => m.moveIndex));
 
+    // Pre-check if the commentator is a reasoning model so we can initialize
+    // the thinking field to '' immediately. This keeps the ThinkingTokensBox
+    // at a stable fixed height from the moment the entry appears — no layout
+    // shift when the first thinking token arrives. Non-reasoning models get
+    // thinking=undefined so the box is never shown.
+    const commentatorModel = this.config.getCommentatorModel();
+    const isReasoningCommentator = !!buildReasoningParams(commentatorModel.id, commentatorModel.reasoningEffort);
+
     const entry: CommentaryEntry = {
       id: genId(),
       moves,
@@ -436,6 +697,7 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
       streaming: true,
       timestamp: Date.now(),
       maxMoveIndex,
+      thinking: isReasoningCommentator ? '' : undefined,
     };
 
     this.entries = [...this.entries, entry];
@@ -446,6 +708,7 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
   }
 
   private async runCommentary(batch: QueuedMove[], entryIndex: number): Promise<void> {
+    let abortCtrl: AbortController | null = null;
     try {
       const model = this.config.getCommentatorModel();
       if (!model.id) {
@@ -455,6 +718,8 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
 
       const client = this.config.getClient();
       const ttsMode = this.config.getTtsMode?.() ?? false;
+      abortCtrl = new AbortController();
+      this.activeGenerationAbort = abortCtrl;
 
       // Dead air = sum of all batch move times.
       // E.g. batch [white 88s, black 3s] → 91s of audio time to fill.
@@ -466,68 +731,107 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
       // Verbosity overrides token budget when set; otherwise use dynamic dead-air sizing.
       // maxTokensOverride (e.g. replay mode) bypasses the dynamic calculation entirely.
       const verbosityTokens = model.verbosity ? VERBOSITY_TOKEN_MAP[model.verbosity] : undefined;
-      const tokenBudget = this.config.maxTokensOverride
+      const rawBudget = this.config.maxTokensOverride
         ?? verbosityTokens
         ?? dynamicMaxTokens(ttsMode, deadAirMs, model.id, model.maxTokens, measuredDeadAirMs);
+      // Reasoning models need token headroom for hidden thinking regardless of verbosity setting.
+      // Without this floor, 'standard' verbosity (1000 tokens) guarantees empty output for gpt-5/o-series.
+      const isReasoningCommentator = !!buildReasoningParams(model.id, model.reasoningEffort);
+      const tokenBudget = (isReasoningCommentator && rawBudget !== undefined)
+        ? Math.max(rawBudget, 6000)
+        : rawBudget;
       const options = {
         maxTokens: tokenBudget,
         reasoningEffort: model.reasoningEffort,
       };
 
-      let result: string;
-      const MAX_COMMENTARY_RETRIES = 2;
+      let baseMessages: import('../llm/prompts').ChatMessage[];
+      let compactMessages: import('../llm/prompts').ChatMessage[];
 
-      for (let attempt = 0; attempt <= MAX_COMMENTARY_RETRIES; attempt++) {
-        if (attempt > 0) {
-          // Clear streaming text before retry so stale partial content doesn't linger
-          this.updateEntryText(entryIndex, '');
-        }
-
-        if (batch.length === 1) {
-          // Single move — use standard commentary
-          const item = batch[0];
-          const ctx: CommentaryContext = {
-            fen: item.fen,
-            lastMove: item.move,
-            lastMoveColor: item.color,
-            whiteModel: item.whiteModel,
-            blackModel: item.blackModel,
-            moveHistory: item.moveHistory,
-            isCheck: item.isCheck,
-            isCapture: item.isCapture,
-            turnNumber: item.turnNumber,
-            stockfishEval: item.stockfishEval,
-            prevEvalCp: item.prevEvalCp,
-            prevCommentary: this.lastCommentaryText || undefined,
-            ttsMode,
-            systemPromptOverride: this.config.systemPromptOverride,
-            verbosity: model.verbosity,
-          };
-
-          result = await client.requestCommentaryStream(model.id, ctx, (partial) => {
-            this.updateEntryText(entryIndex, partial);
-          }, options);
-        } else {
-          // Batch — use batch prompt (plain text, no structured output)
-          const messages = buildBatchCommentaryPrompt(batch, this.lastCommentaryText || undefined, ttsMode, this.config.systemPromptOverride, model.verbosity);
-          const raw = await client.requestMoveRaw(model.id, messages, 0.8, { promptLevel: 'p0' }, (partial) => {
-            this.updateEntryText(entryIndex, partial);
-          });
-          result = raw.content;
-        }
-
-        // Retry if the LLM returned empty or the fallback placeholder
-        const isEmpty = !result || result.trim() === '' || result.startsWith('(No commentary generated)');
-        if (!isEmpty) break;
-        if (attempt < MAX_COMMENTARY_RETRIES) {
-          console.warn(`[Commentary] Empty result on attempt ${attempt + 1}, retrying...`);
-        }
+      if (batch.length === 1) {
+        const item = batch[0];
+        const ctx: CommentaryContext = {
+          fen: item.fenBefore ?? item.fen,
+          resultingFen: item.fen,
+          lastMove: item.move,
+          lastMoveColor: item.color,
+          whiteModel: item.whiteModel,
+          blackModel: item.blackModel,
+          moveHistory: item.moveHistory,
+          isCheck: item.isCheck,
+          isCapture: item.isCapture,
+          turnNumber: item.turnNumber,
+        stockfishEval: item.stockfishEval,
+        prevEvalCp: item.prevEvalCp,
+        preMoveBestMove: item.preMoveBestMove,
+        preMoveBestMoveSan: item.preMoveBestMoveSan,
+        prevCommentary: this.lastCommentaryText || undefined,
+        ttsMode,
+          systemPromptOverride: this.config.systemPromptOverride,
+          verbosity: model.verbosity,
+          illegalMovesAttempted: item.illegalMovesAttempted,
+          formatDowngraded: item.formatDowngraded,
+        };
+        baseMessages = buildCommentaryPrompt(ctx);
+        compactMessages = buildCompactCommentaryMessages(ctx, this.config.systemPromptOverride);
+      } else {
+        baseMessages = buildBatchCommentaryPrompt(batch, this.lastCommentaryText || undefined, ttsMode, this.config.systemPromptOverride, model.verbosity);
+        compactMessages = buildCompactBatchMessages(batch, ttsMode, this.config.systemPromptOverride, model.verbosity);
       }
 
-      this.completeEntry(entryIndex, result!);
+      const result = await runResilientTextGeneration({
+        client,
+        model: model.id,
+        messages: baseMessages,
+        temperature: 0.8,
+        responseOptions: { ...options, promptLevel: 'p0' },
+        abortSignal: abortCtrl.signal,
+        onText: (text) => this.updateEntryText(entryIndex, text),
+        onThinking: (thinking) => this.updateEntryThinking(entryIndex, thinking),
+        stallTimeoutMs: ttsMode ? 30000 : 45000,
+        hardTimeoutMs: ttsMode ? 120000 : 180000,
+        maxAttempts: 3,
+        buildRetryPlan: ({ attempt, reason, result: attemptResult, responseOptions }) => {
+          if (attemptResult.text.trim()) return undefined;
+          const shortenedPrompt = attempt === 0 && !attemptResult.text.trim();
+          const messages = attemptResult.text.trim()
+            ? undefined
+            : [
+              ...((shortenedPrompt && (reason === 'empty' || reason === 'timeout' || reason === 'placeholder')) ? compactMessages : baseMessages),
+              {
+                role: 'user' as const,
+                content: ttsMode
+                  ? 'Retry with 2-3 punchy spoken sentences. Produce visible commentary immediately.'
+                  : 'Retry with a shorter commentary. Produce visible output immediately and skip any throat-clearing.',
+              },
+            ];
+          return {
+            messages,
+            responseOptions: {
+              ...responseOptions,
+              promptLevel: 'p0',
+            },
+          };
+        },
+      });
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
+
+      this.completeEntry(entryIndex, result.text || buildCommentaryFallback(batch, ttsMode));
     } catch (err) {
+      if (abortCtrl?.signal.aborted) {
+        if (this.activeGenerationAbort === abortCtrl) {
+          this.activeGenerationAbort = null;
+        }
+        return;
+      }
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
       const message = err instanceof Error ? err.message : String(err);
-      this.completeEntry(entryIndex, `(Commentary error: ${message})`);
+      console.warn('[Commentary] Generation failed:', message);
+      this.completeEntry(entryIndex, buildCommentaryFallback(batch, this.config.getTtsMode?.() ?? false));
     }
   }
 
@@ -535,6 +839,14 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
     if (this.destroyed || entryIndex >= this.entries.length) return;
     const updated = [...this.entries];
     updated[entryIndex] = { ...updated[entryIndex], text, streaming: true };
+    this.entries = updated;
+    this.emit();
+  }
+
+  private updateEntryThinking(entryIndex: number, thinking: string): void {
+    if (this.destroyed || entryIndex >= this.entries.length) return;
+    const updated = [...this.entries];
+    updated[entryIndex] = { ...updated[entryIndex], thinking, streaming: true };
     this.entries = updated;
     this.emit();
   }
@@ -548,11 +860,15 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
     const updated = [...this.entries];
     updated[entryIndex] = { ...updated[entryIndex], text: clean, rawText: rawText, streaming: false, annotations };
     this.entries = updated;
-    this.lastCommentaryText = clean;
 
     if (isFiller) {
       this.fillerActive = false;
+      if (clean) {
+        this.recentFillerTexts.push(clean);
+        if (this.recentFillerTexts.length > 4) this.recentFillerTexts.shift();
+      }
     } else {
+      this.lastCommentaryText = clean;
       this.active = null;
       this.activeEntryIndex = -1;
       this._lastCallCompletedAt = Date.now();
@@ -604,23 +920,49 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
     this.fillerActive = false;
   }
 
+  private scheduleFillerRecheck(ms: number): void {
+    if (this.destroyed || this.fillerTimer) return;
+    this.fillerTimer = setTimeout(() => {
+      this.fillerTimer = null;
+      this.scheduleFillerIfIdle();
+    }, ms);
+  }
+
   private scheduleFillerIfIdle(): void {
     if (this.destroyed) return;
     if (this.pending.length > 0 || this.active !== null) return;
     if (!this.lastMoveSnapshot) return; // No game context yet
+    if (this.puzzleBreakActive || (this.config.getPuzzleBreakActive?.() ?? false)) return; // Puzzle break already open
 
     const fillerEnabled = this.config.getFillerEnabled?.() ?? false;
     const ttsMode = this.config.getTtsMode?.() ?? false;
     if (!fillerEnabled || !ttsMode) return;
 
-    // Don't pile up fillers if audio backlog is already > 1
-    const backlog = this.config.getAudioBacklog?.() ?? 0;
-    if (backlog > 1) return;
-
-    // Wait a short delay before firing filler — gives time for the next move to arrive
-    // If average move time is short (fast game), don't bother with fillers
     const avgMoveTime = this.getAvgMoveTimeMs();
-    if (avgMoveTime < 10000) return; // Skip fillers for fast games (<10s between moves)
+    const currentThinkingMs = this.lastMoveSnapshotAt ? Date.now() - this.lastMoveSnapshotAt : 0;
+    const audioPlaying = this.config.getAudioPlaying?.() ?? false;
+    if (audioPlaying) {
+      this.scheduleFillerRecheck(2000);
+      return;
+    }
+    const backlog = this.config.getAudioBacklog?.() ?? 0;
+    if (backlog > 0) {
+      this.scheduleFillerRecheck(2000);
+      return;
+    }
+
+    // Skip fillers for fast games (<10s avg), BUT override if the current player has already been
+    // thinking for >15s — handles gauntlets where opening book moves pull the average down.
+    if (avgMoveTime < 10000 && currentThinkingMs < 15000) {
+      // Not ready yet — schedule a re-check when we might be. Without this, nothing
+      // wakes us up after the intro commentary completes on a slow-thinking game.
+      const recheckMs = 15000 - currentThinkingMs;
+      if (recheckMs > 0) {
+        console.log(`[Commentary] Dead air watch: re-check in ${Math.round(recheckMs / 1000)}s (thinking ${Math.round(currentThinkingMs / 1000)}s avg)`);
+        this.scheduleFillerRecheck(recheckMs + 500);
+      }
+      return;
+    }
 
     // Delay: 2s (let audio queue drain a bit before generating more)
     this.fillerTimer = setTimeout(() => {
@@ -632,15 +974,53 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
   private async runFiller(): Promise<void> {
     if (this.destroyed || this.pending.length > 0 || this.active !== null) return;
     if (this.fillerActive) return;
+    if (this.puzzleBreakActive || (this.config.getPuzzleBreakActive?.() ?? false)) return;
 
     const model = this.config.getCommentatorModel();
     if (!model.id) return;
 
-    // Re-check audio backlog right before generating
-    const backlog = this.config.getAudioBacklog?.() ?? 0;
-    if (backlog > 1) return;
+    // Re-check audio backlog right before generating.
+    // Require true dead air (backlog === 0) — don't start filler/puzzle break
+    // while the previous commentary sentence is still playing.
+    const audioPlaying = this.config.getAudioPlaying?.() ?? false;
+    if (audioPlaying) {
+      this.scheduleFillerRecheck(2000);
+      return;
+    }
 
     const snap = this.lastMoveSnapshot!;
+    // Who is currently thinking? The player opposite to whoever just moved.
+    const thinkingColor = snap.color === 'w' ? 'b' : 'w';
+    const thinkingModel = thinkingColor === 'w' ? snap.whiteModel : snap.blackModel;
+    const thinkingReasoningEffort = thinkingColor === 'w' ? snap.whiteReasoningEffort : snap.blackReasoningEffort;
+    const thinkingElapsedMs = this.lastMoveSnapshotAt ? Date.now() - this.lastMoveSnapshotAt : 0;
+    const backlog = this.config.getAudioBacklog?.() ?? 0;
+    if (backlog > 0) {
+      this.scheduleFillerRecheck(2000);
+      return;
+    }
+
+    // Puzzle break: fires as a filler replacement when the thinking model is a genuine
+    // long thinker (medium/high/xhigh reasoning effort), puzzle break is enabled,
+    // AND the model has been thinking for at least 25s (prevents premature firing on
+    // fast games or games that just started).
+    const PUZZLE_BREAK_MIN_THINKING_MS = 25000;
+    const puzzleBreakEnabled = this.config.getPuzzleBreakEnabled?.() ?? false;
+    const isPuzzleBreakEligibleThinker =
+      thinkingReasoningEffort === 'medium'
+      || thinkingReasoningEffort === 'high'
+      || thinkingReasoningEffort === 'xhigh';
+    const hasThoughtLongEnough = thinkingElapsedMs >= PUZZLE_BREAK_MIN_THINKING_MS;
+    if (puzzleBreakEnabled && isPuzzleBreakEligibleThinker && hasThoughtLongEnough && this.config.onPuzzleBreak) {
+      console.log(`[PuzzleBreak] Filler slot → puzzle break (${thinkingModel} @ ${thinkingReasoningEffort}, thinking ${Math.round(thinkingElapsedMs / 1000)}s)`);
+      this.puzzleBreakActive = true;
+      this.config.onPuzzleBreak();
+      return;
+    }
+    if (puzzleBreakEnabled && isPuzzleBreakEligibleThinker && !hasThoughtLongEnough) {
+      console.log(`[PuzzleBreak] Skipping — only ${Math.round(thinkingElapsedMs / 1000)}s thinking (need ${PUZZLE_BREAK_MIN_THINKING_MS / 1000}s)`);
+    }
+
     const fillerCtx: FillerContext = {
       fen: snap.fen,
       moveHistory: snap.moveHistory,
@@ -652,6 +1032,11 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
       evalCp: snap.stockfishEval?.scoreCp,
       prevCommentary: this.lastCommentaryText || undefined,
       channelInfo: this.config.channelInfo,
+      thinkingElapsedMs,
+      thinkingModel,
+      thinkingReasoningEffort,
+      recentFillerCategories: this.recentFillerCategories,
+      recentFillerTexts: this.recentFillerTexts,
     };
 
     const picked = pickFillerPrompt(fillerCtx, this.lastFillerCategory);
@@ -659,6 +1044,8 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
 
     this.fillerActive = true;
     this.lastFillerCategory = picked.template.category;
+    this.recentFillerCategories.push(picked.template.category);
+    if (this.recentFillerCategories.length > 4) this.recentFillerCategories.shift();
 
     const entry: CommentaryEntry = {
       id: genId(),
@@ -680,27 +1067,30 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
       const client = this.config.getClient();
       const isReasoning = !!buildReasoningParams(model.id);
 
-      // Fillers are short — ~150 tokens of output (15s of speech)
+      // Fillers are short - ~150 tokens of output (15s of speech)
       const maxTokens = isReasoning ? 4000 : 200;
 
-      const raw = await client.requestMoveRaw(
-        model.id,
-        picked.messages,
-        0.9,
-        { promptLevel: 'p0' },
-        (partial) => {
-          if (abortCtrl.signal.aborted) return;
-          this.updateEntryText(entryIndex, partial);
-        },
-      );
+      const result = await runResilientTextGeneration({
+        client,
+        model: model.id,
+        messages: picked.messages,
+        temperature: 0.9,
+        responseOptions: { promptLevel: 'p0', maxTokens, reasoningEffort: model.reasoningEffort },
+        abortSignal: abortCtrl.signal,
+        onText: (text) => this.updateEntryText(entryIndex, text),
+        onThinking: (thinking) => this.updateEntryThinking(entryIndex, thinking),
+        stallTimeoutMs: 20000,
+        hardTimeoutMs: 60000,
+        maxAttempts: 2,
+      });
 
       if (abortCtrl.signal.aborted) return;
-      this.completeEntry(entryIndex, raw.content, true);
+      this.completeEntry(entryIndex, result.text || buildFillerFallback(fillerCtx), true);
     } catch (err) {
       if (abortCtrl.signal.aborted) return;
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`[Filler] Error: ${message}`);
-      this.completeEntry(entryIndex, `(Filler error: ${message})`, true);
+      this.completeEntry(entryIndex, buildFillerFallback(fillerCtx), true);
     }
   }
 }

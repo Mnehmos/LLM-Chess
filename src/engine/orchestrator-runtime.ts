@@ -5,7 +5,7 @@ import type {
 import type { LLMClient } from '../llm/client';
 import type { ChatMessage } from '../llm/prompts';
 import { parseMoveResponse } from '../llm/parser';
-import { getStockfish } from '../chess/stockfish';
+import { getStockfishAnalysis } from '../chess/stockfish';
 
 export interface OrchestratorAdvice {
   playerId: string;
@@ -180,7 +180,7 @@ Respond with JSON: { "advice": [{ "player_id": "<id>", "advice": "<text>", "reco
     _playerColor: PieceColor,
   ): Promise<OrchestratorTurnResult> {
     const start = Date.now();
-    const sf = getStockfish();
+    const sf = getStockfishAnalysis();
     if (!sf.isReady()) await sf.init();
 
     const advice: OrchestratorAdvice[] = [];
@@ -208,7 +208,7 @@ Respond with JSON: { "advice": [{ "player_id": "<id>", "advice": "<text>", "reco
     advice: OrchestratorAdvice[],
     playerContexts: Map<string, TurnContext>,
   ): Promise<void> {
-    const sf = getStockfish();
+    const sf = getStockfishAnalysis();
     if (!sf.isReady()) await sf.init();
 
     for (const a of advice) {

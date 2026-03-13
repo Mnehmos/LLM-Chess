@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { GameState } from '../engine/types';
 import type { EvalResult } from '../chess/stockfish';
 import type { CommentaryEntry } from '../commentary/commentaryQueue';
@@ -40,6 +40,10 @@ interface GameLayoutProps {
   deadAirRef?: React.MutableRefObject<number>;
   /** Shared ref for audio backlog count (filler system reads it). */
   audioBacklogRef?: React.MutableRefObject<number>;
+  /** Shared ref for actual narration playback state. */
+  audioPlayingRef?: React.MutableRefObject<boolean>;
+  /** Called when the audio queue fully drains — lets the filler system re-check. */
+  onAudioDrained?: () => void;
   /** Override turn number to match narration pace. */
   displayTurn?: number;
   /** Limit displayed moves to this count (narration-synced). null = show all. */
@@ -165,11 +169,19 @@ export function GameLayout({
   boardAnnotations,
   deadAirRef,
   audioBacklogRef,
+  audioPlayingRef,
+  onAudioDrained,
   displayTurn,
   displayMoveCount,
   children,
 }: GameLayoutProps) {
-  const [showDetails, setShowDetails] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
+
   // When displayMoveCount is set, slice moveHistory to only show narrated moves
   const visibleMoveHistory = displayMoveCount !== undefined && displayMoveCount !== null
     ? gameState.moveHistory.slice(0, displayMoveCount)
@@ -184,7 +196,7 @@ export function GameLayout({
         currentColor: (visibleMoveHistory.length % 2 === 0 ? 'w' : 'b') as 'w' | 'b',
         // Gate result/status to narration position — don't spoil the outcome
         // until the commentator has narrated through the final move.
-        result: displayMoveCount >= gameState.moveHistory.length ? gameState.result : null,
+        result: displayMoveCount >= gameState.moveHistory.length ? (gameState.result ?? undefined) : undefined,
         status: displayMoveCount >= gameState.moveHistory.length ? gameState.status : 'in_progress' as const,
       }
     : gameState;
@@ -206,66 +218,89 @@ export function GameLayout({
           displayTurn={displayTurn}
         />
 
-        {/* Main content: Board + Commentary side by side */}
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr_420px] gap-4 items-start">
-          {/* Board column — centered, large */}
-          <div className="flex flex-col items-center gap-2">
-            <Graveyard eventLog={gameState.eventLog} />
-            <Board fen={displayFen} lastMove={lastMove} highlightSquares={highlightSquares} arrows={arrows} annotations={boardAnnotations} />
-            <TurnStepper
-              eventLog={gameState.eventLog}
-              viewingMoveIndex={viewingMoveIndex}
-              setViewingMoveIndex={setViewingMoveIndex}
-            />
-          </div>
-
-          {/* Commentary column — tall, scrollable */}
-          <div className="flex flex-col gap-3 h-[520px]">
-            <CommentaryPanel
-              entries={commentaryEntries}
-              commentatorModelName={commentatorModelName}
-              onNarrationStart={onNarrationStart}
-              onNarrationSquares={onNarrationSquares}
-              deadAirRef={deadAirRef}
-              audioBacklogRef={audioBacklogRef}
-            />
-          </div>
-        </div>
-
-        {/* Collapsible details */}
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setShowDetails(!showDetails)}
-            className="text-xs text-text-muted hover:text-text-primary transition-colors"
-          >
-            {showDetails ? 'Hide Details' : 'Show Stats & Moves'}
-          </button>
-          {onToggleLivestream && (
-            <button
-              type="button"
-              onClick={onToggleLivestream}
-              className="text-xs text-purple-light hover:text-purple-accent transition-colors ml-auto"
-            >
-              Exit Livestream
-            </button>
-          )}
-        </div>
-
-        {showDetails && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 animate-in fade-in duration-200">
+        {/* Main 3-column layout — optimised for 1920×1080 */}
+        <div className="grid gap-4 items-start" style={{ gridTemplateColumns: '340px auto 580px' }}>
+          {/* Left: Stats + Move list */}
+          <div className="flex flex-col gap-3 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 200px)' }}>
             <LiveStats
               game={visibleGameState}
               streamingText={streamingText}
               streamingModel={streamingModel}
               stockfishEval={visibleStockfishEval}
             />
-            <MoveHistory moves={visibleMoveHistory} />
-            {showHumanMoveInput && <HumanMoveInput />}
-            {showEventLog && <EventLog events={gameState.eventLog} />}
-            {children}
+            <MoveHistory
+              moves={visibleMoveHistory}
+              activeIndex={displayMoveCount !== undefined && displayMoveCount !== null ? displayMoveCount - 1 : undefined}
+            />
           </div>
-        )}
+
+          {/* Center: Board — scaled up for 1080p */}
+          <div className="flex flex-col items-center gap-2">
+            <Graveyard eventLog={gameState.eventLog} />
+            {/* Scale board 1.5× — container sized to scaled dimensions so grid respects it */}
+            <div style={{ width: 612, height: 606, position: 'relative', flexShrink: 0 }}>
+              <div style={{ position: 'absolute', top: 0, left: 0, transform: 'scale(1.5)', transformOrigin: 'top left' }}>
+                <Board
+                  fen={displayFen}
+                  lastMove={lastMove}
+                  highlightSquares={highlightSquares}
+                  arrows={arrows}
+                  annotations={boardAnnotations}
+                />
+              </div>
+            </div>
+            <TurnStepper
+              eventLog={gameState.eventLog}
+              viewingMoveIndex={viewingMoveIndex}
+              setViewingMoveIndex={setViewingMoveIndex}
+            />
+            {visibleStockfishEval && <StockfishBar eval={visibleStockfishEval} />}
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  if (document.fullscreenElement) {
+                    void document.exitFullscreen();
+                  } else {
+                    void document.documentElement.requestFullscreen();
+                  }
+                }}
+                className="text-xs text-text-muted hover:text-purple-light transition-colors"
+                title="Toggle fullscreen (F11)"
+              >
+                {isFullscreen ? '⊡ Exit Fullscreen' : '⊞ Fullscreen'}
+              </button>
+              {onToggleLivestream && (
+                <button
+                  type="button"
+                  onClick={onToggleLivestream}
+                  className="text-xs text-purple-light hover:text-purple-accent transition-colors"
+                >
+                  Exit Livestream
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Right: Commentary — large and tall */}
+          <div className="flex flex-col gap-3" style={{ height: 'calc(100vh - 200px)' }}>
+            <CommentaryPanel
+              entries={commentaryEntries}
+              commentatorModelName={commentatorModelName}
+              sessionKey={gameState.gameId}
+              onNarrationStart={onNarrationStart}
+              onNarrationSquares={onNarrationSquares}
+              deadAirRef={deadAirRef}
+              audioBacklogRef={audioBacklogRef}
+              audioPlayingRef={audioPlayingRef}
+              onAudioDrained={onAudioDrained}
+            />
+          </div>
+        </div>
+
+        {showHumanMoveInput && <HumanMoveInput />}
+        {showEventLog && <EventLog events={gameState.eventLog} />}
+        {children}
       </div>
     );
   }
@@ -278,10 +313,13 @@ export function GameLayout({
         <CommentaryPanel
           entries={commentaryEntries}
           commentatorModelName={commentatorModelName}
+          sessionKey={gameState.gameId}
           onNarrationStart={onNarrationStart}
           onNarrationSquares={onNarrationSquares}
           deadAirRef={deadAirRef}
           audioBacklogRef={audioBacklogRef}
+          audioPlayingRef={audioPlayingRef}
+          onAudioDrained={onAudioDrained}
         />
       </div>
 

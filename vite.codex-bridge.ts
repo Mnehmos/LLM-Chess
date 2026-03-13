@@ -43,12 +43,17 @@ let cachedVersionAt = 0;
 let cachedCommandInfo: CodexCommandInfo | null = null;
 let cachedCommandAt = 0;
 let lastCodexLookupError = 'Codex binary not resolved';
+const LOCAL_PUZZLE_CATALOG_ROUTE = '/data/lichess-puzzles-1500-plus.json';
+const LOCAL_PUZZLE_CATALOG_PATH = path.join(process.cwd(), 'public', 'data', 'lichess-puzzles-1500-plus.json');
 
 export function codexBridgePlugin(): Plugin {
   return {
     name: 'codex-bridge',
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
+        if (await tryServeLocalPuzzleCatalog(req, res)) {
+          return;
+        }
         if (!req.url?.startsWith('/api/codex-bridge/')) {
           next();
           return;
@@ -58,6 +63,9 @@ export function codexBridgePlugin(): Plugin {
     },
     configurePreviewServer(server) {
       server.middlewares.use(async (req, res, next) => {
+        if (await tryServeLocalPuzzleCatalog(req, res)) {
+          return;
+        }
         if (!req.url?.startsWith('/api/codex-bridge/')) {
           next();
           return;
@@ -66,6 +74,28 @@ export function codexBridgePlugin(): Plugin {
       });
     },
   };
+}
+
+async function tryServeLocalPuzzleCatalog(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+  const requestUrl = req.url?.split('?')[0];
+  if (req.method !== 'GET' || requestUrl !== LOCAL_PUZZLE_CATALOG_ROUTE) {
+    return false;
+  }
+
+  try {
+    const payload = await fs.readFile(LOCAL_PUZZLE_CATALOG_PATH);
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(payload);
+  } catch {
+    sendJson(res, 404, {
+      error: 'Local puzzle catalog not found',
+      path: LOCAL_PUZZLE_CATALOG_PATH,
+    });
+  }
+
+  return true;
 }
 
 async function handleBridgeRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {

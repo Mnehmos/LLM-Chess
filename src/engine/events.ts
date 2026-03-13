@@ -1,5 +1,6 @@
 import type { PlayerConfig, PieceColor, GameResult, MoveAttempt, OracleAttemptRecord, PredictedLine } from './types';
 import type { BenchmarkFraming, CorrectionLoopMode, OutputFormat, ResponseToolInvocation } from './types';
+import type { MoveRecord } from './types';
 
 interface BaseEvent {
   eventId: string;
@@ -14,6 +15,7 @@ export interface GameCreatedEvent extends BaseEvent {
     white: PlayerConfig;
     black: PlayerConfig;
     initialFen: string;
+    priorMoveHistory?: MoveRecord[];
   };
 }
 
@@ -119,6 +121,8 @@ export interface MoveAppliedEvent extends BaseEvent {
     toolInvocations?: ResponseToolInvocation[];
     scratchpadState?: string;
     benchmarkFraming?: BenchmarkFraming;
+    // Illegal move attempts during this turn (for commentary context)
+    illegalMovesAttempted?: string[];
     // Attack tracking
     attackActive?: boolean;
     activeAttackVectors?: Array<{ channel: string; vectorId: string }>;

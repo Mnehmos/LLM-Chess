@@ -15,7 +15,7 @@ import type {
 import type { GameEvent } from './events';
 import { gameReducer } from './reducer';
 import { ChessBoard } from '../chess/board';
-import { createLLMClient, type LLMClient, type LLMProviderConfig } from '../llm/client';
+import { createLLMClient, type LLMClient, type LLMProviderConfig, type RetryReason } from '../llm/client';
 import { PermanentAPIError } from '../llm/errors';
 import { parseMoveResponse } from '../llm/parser';
 import { createInitialGameState } from './types';
@@ -167,13 +167,9 @@ export class GameRuntime {
         white: this.white,
         black: this.black,
         initialFen: this.chess.fen(),
+        priorMoveHistory: this.priorMoveRecords.length > 0 ? [...this.priorMoveRecords] : undefined,
       },
     });
-
-    // Re-seed prior move records after GameCreated (reducer resets moveHistory to [])
-    if (this.priorMoveRecords.length > 0) {
-      this.state = { ...this.state, moveHistory: [...this.priorMoveRecords] };
-    }
 
     this.emit({
       type: 'GameStarted',
@@ -234,7 +230,8 @@ export class GameRuntime {
       }
 
       let moveApplied = false;
-      let lastIllegalMove: string | undefined;
+      let lastRetryReason: RetryReason | undefined;
+      const illegalMovesAttempted: string[] = [];
       let moveAttempt = 0;
       const MAX_API_ERRORS = 3;
       let apiErrors = 0;
@@ -362,6 +359,9 @@ export class GameRuntime {
       // commentary + TTS run async in the background at their own pace.
       else if (player.type === 'replay') {
         if (this.replayMoveIndex < this.replayMoves.length) {
+          if (this.replayPaceCheck && this.replayMoveIndex > 0 && !this.aborted) {
+            await this.replayPaceCheck();
+          }
           // Simple delay between moves — like LLM think time in tournament mode
           if (this.replayMoveIndex > 0 && this.replayMoveDelayMs > 0 && !this.aborted) {
             await new Promise(r => setTimeout(r, this.replayMoveDelayMs));
@@ -498,7 +498,7 @@ export class GameRuntime {
             effectivePlayer,
             effectiveContext,
             color,
-            lastIllegalMove,
+            lastRetryReason,
             effectiveAdvisor,
           );
         } catch (err) {
@@ -621,7 +621,9 @@ export class GameRuntime {
               maxAttempts: effectivePlayer.maxRetries,
             },
           });
-          lastIllegalMove = decision.rawContent.slice(0, 100);
+          lastRetryReason = decision.rawContent.trim()
+            ? { kind: 'parse_error' }
+            : { kind: 'empty' };
           continue;
         }
 
@@ -652,7 +654,8 @@ export class GameRuntime {
               maxAttempts: effectivePlayer.maxRetries,
             },
           });
-          lastIllegalMove = parsed.move;
+          illegalMovesAttempted.push(parsed.move);
+          lastRetryReason = { kind: 'illegal', move: parsed.move };
           continue;
         }
 
@@ -713,6 +716,7 @@ export class GameRuntime {
             toolInvocations: decision.toolInvocations,
             scratchpadState: decision.scratchpadState,
             benchmarkFraming: preparedTurn.benchmarkFraming,
+            illegalMovesAttempted: illegalMovesAttempted.length > 0 ? illegalMovesAttempted : undefined,
             attackActive: preparedTurn.activeAttacks.length > 0,
             activeAttackVectors: preparedTurn.activeAttacks.length > 0
               ? preparedTurn.activeAttacks.map(a => ({ channel: a.channel, vectorId: a.vectorId }))
@@ -768,7 +772,7 @@ export class GameRuntime {
     player: PlayerConfig,
     context: TurnContext,
     color: PieceColor,
-    previousIllegalMove?: string,
+    previousIllegalMove?: RetryReason,
     advisorConfig?: AdvisorConfig,
   ): Promise<{
     parsed: ReturnType<typeof parseMoveResponse> | null;

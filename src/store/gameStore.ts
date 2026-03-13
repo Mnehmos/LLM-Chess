@@ -1,11 +1,12 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { CommentatorConfig, GameState, PlayerConfig } from '../engine/types';
+import type { CommentatorConfig, EvalLogEntry, GameState, PlayerConfig } from '../engine/types';
 import type { GameEvent } from '../engine/events';
 import type { EvalResult } from '../chess/stockfish';
 import { GameRuntime } from '../engine/runtime';
 import { getStockfishEval } from '../chess/stockfish';
 import type { LLMProviderConfig } from '../llm/client';
+import { Chess } from 'chess.js';
 
 interface GameStore {
   runtime: GameRuntime | null;
@@ -18,7 +19,7 @@ interface GameStore {
   viewingMoveIndex: number | null; // null = live view
   stockfishEval: EvalResult | null;
   prevEvalCp: number | null;
-  evalLog: Record<number, { evalCp: number; isMate: boolean; mateIn: number | null; bestMove: string }>;
+  evalLog: Record<number, EvalLogEntry>;
 
   startGame: (white: Omit<PlayerConfig, 'id' | 'color'>, black: Omit<PlayerConfig, 'id' | 'color'>, llmConfig: LLMProviderConfig) => void;
   setCommentatorModel: (model: CommentatorConfig) => void;
@@ -154,12 +155,12 @@ export const useGameStore = create<GameStore>()((set, get) => ({
 
 async function handleMoveApplied(state: GameState): Promise<void> {
   const store = useGameStore.getState();
-  const prevEvalCp = store.stockfishEval?.scoreCp ?? null;
   const useOracleDepth = !!store.commentatorModel.id && (store.commentatorModel.mode ?? 'oracle') === 'oracle';
   const evalDepth = useOracleDepth ? (store.commentatorModel.stockfishDepth ?? 18) : 12;
   const expectedGameId = state.gameId;
   const expectedMoveCount = state.moveHistory.length;
   const expectedFen = state.fen;
+  const moveIdx = state.moveHistory.length - 1;
 
   try {
     const sf = getStockfishEval();
@@ -167,6 +168,22 @@ async function handleMoveApplied(state: GameState): Promise<void> {
       try { await sf.init(); } catch { return; }
     }
     if (sf.isReady()) {
+      const priorEntry = moveIdx > 0 ? useGameStore.getState().evalLog[moveIdx - 1] : undefined;
+      let preMoveEval: EvalResult | null = priorEntry
+        ? {
+            scoreCp: priorEntry.evalCp,
+            isMate: priorEntry.isMate,
+            mateIn: priorEntry.mateIn,
+            bestMove: priorEntry.bestMove,
+            pv: priorEntry.pv,
+            depth: priorEntry.depth,
+          }
+        : null;
+      if (!preMoveEval) {
+        const preFen = reconstructFenBeforeMove(state, moveIdx);
+        preMoveEval = await sf.evaluate(preFen, evalDepth);
+      }
+
       const evalResult = await sf.evaluate(state.fen, evalDepth);
       const latest = useGameStore.getState().gameState;
       if (
@@ -177,23 +194,47 @@ async function handleMoveApplied(state: GameState): Promise<void> {
       ) {
         return;
       }
-      const moveIdx = state.moveHistory.length - 1;
       const prevLog = useGameStore.getState().evalLog;
+      const evalEntry: EvalLogEntry = {
+        evalCp: evalResult.scoreCp,
+        isMate: evalResult.isMate,
+        mateIn: evalResult.mateIn,
+        bestMove: evalResult.bestMove,
+        pv: evalResult.pv,
+        depth: evalResult.depth,
+        preMoveEvalCp: preMoveEval?.scoreCp ?? null,
+        preMoveIsMate: preMoveEval?.isMate,
+        preMoveMateIn: preMoveEval?.mateIn ?? null,
+        preMoveBestMove: preMoveEval?.bestMove,
+        preMovePv: preMoveEval?.pv,
+        preMoveDepth: preMoveEval?.depth,
+      };
       useGameStore.setState({
         stockfishEval: evalResult,
-        prevEvalCp: prevEvalCp,
+        prevEvalCp: preMoveEval?.scoreCp ?? null,
         evalLog: {
           ...prevLog,
-          [moveIdx]: {
-            evalCp: evalResult.scoreCp,
-            isMate: evalResult.isMate,
-            mateIn: evalResult.mateIn,
-            bestMove: evalResult.bestMove,
-          },
+          [moveIdx]: evalEntry,
         },
       });
     }
   } catch (err) {
     console.warn('Stockfish eval failed:', err);
   }
+}
+
+function reconstructFenBeforeMove(state: GameState, moveIdx: number): string {
+  const created = state.eventLog.find((event) => event.type === 'GameCreated');
+  const initialFen = created?.type === 'GameCreated'
+    ? created.payload.initialFen
+    : 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  const chess = new Chess(initialFen);
+  for (let i = 0; i < moveIdx; i++) {
+    try {
+      chess.move(state.moveHistory[i].move);
+    } catch {
+      break;
+    }
+  }
+  return chess.fen();
 }

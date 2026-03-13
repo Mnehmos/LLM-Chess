@@ -1,5 +1,4 @@
 import type { ChatMessage } from '../llm/prompts';
-import type { QueuedMove } from './commentaryQueue';
 
 export type FillerCategory =
   | 'position_analysis'
@@ -8,15 +7,13 @@ export type FillerCategory =
   | 'game_recap'
   | 'chess_education'
   | 'channel_plug'
-  | 'audience_engagement';
+  | 'audience_engagement'
+  | 'thinking_update';
 
 export interface FillerPromptTemplate {
   category: FillerCategory;
-  /** Weight for random selection (higher = more likely). */
   weight: number;
-  /** Min turns into the game before this filler is available. */
   minTurn?: number;
-  /** Build the user message given current game state. */
   build: (ctx: FillerContext) => string;
 }
 
@@ -28,12 +25,14 @@ export interface FillerContext {
   blackModel: string;
   lastMove?: string;
   lastMoveColor?: 'w' | 'b';
-  /** Current Stockfish eval in centipawns (from White's perspective). */
   evalCp?: number;
-  /** Previous commentary text for continuity. */
   prevCommentary?: string;
-  /** Custom channel/stream info for plugs. */
   channelInfo?: ChannelInfo;
+  thinkingElapsedMs?: number;
+  thinkingModel?: string;
+  thinkingReasoningEffort?: string;
+  recentFillerCategories?: FillerCategory[];
+  recentFillerTexts?: string[];
 }
 
 export interface ChannelInfo {
@@ -41,197 +40,254 @@ export interface ChannelInfo {
   website?: string;
   donationUrl?: string;
   socialLinks?: string[];
-  /** Extra lines the streamer wants mentioned. */
   customPlugLines?: string[];
 }
 
-const FILLER_SYSTEM_PROMPT = `You are a live chess stream commentator filling time between moves. Keep it conversational, engaging, and natural — like a real broadcast.
+const FILLER_SYSTEM_PROMPT = `You are a live chess stream commentator filling dead air between moves.
 
-RULES:
-- Plain spoken text ONLY — no markdown, no special formatting
-- ALWAYS use standard algebraic notation for chess moves (Nf3, Bxe5, O-O)
-- Short and punchy — aim for 3-5 sentences (about 15 seconds of speech)
-- Sound natural and enthusiastic, not robotic
-- Never say "as an AI" or break the commentator persona
+Stay grounded in the current game, but do not sound scripted. Use the requested topic only as a launch point, then improvise naturally from there.
 
-BOARD ANNOTATIONS — Draw on the board with inline tags:
-- [arrow e2 e4] — green arrow (colors: green, red, yellow, blue, orange, purple, white, cyan)
-- [highlight d5] — highlight a square (default yellow)
-- [circle f3] — circle a square (default blue)
-Place tags at the END of sentences — text must read naturally without them. Tags are stripped from speech automatically.`;
+Rules:
+- Plain spoken text only. No markdown, no lists.
+- Use standard algebraic notation for moves.
+- Aim for 2-5 sentences.
+- Be concrete and varied, not generic broadcaster wallpaper.
+- Do not repeat the same opener, takeaway, or rhythm from recent filler.
+- Do not say "while we wait", "fascinating position", "both sides have chances", "anything can happen", or "you can feel the tension".
+- Prefer one clear idea over several vague ones.
+
+Board annotations:
+- [arrow e2 e4]
+- [highlight d5]
+- [circle f3]
+Only use annotations when they help.`;
+
+const FILLER_STYLE_ANGLES = [
+  'sound like you just spotted one sharp detail worth sharing',
+  'sound like an experienced host staying lively without padding',
+  'sound a little more analytical than theatrical',
+  'sound like a strong club coach talking to serious viewers',
+  'sound brisk, fresh, and specific',
+];
+
+function moveWindow(ctx: FillerContext, maxMoves = 12): string {
+  const moves = ctx.moveHistory.slice(-maxMoves);
+  return moves.length > 0 ? moves.join(' ') : '(opening position)';
+}
+
+function evalText(ctx: FillerContext): string {
+  return ctx.evalCp !== undefined ? `Current eval: ${(ctx.evalCp / 100).toFixed(1)} from White's perspective.` : '';
+}
 
 const TEMPLATES: FillerPromptTemplate[] = [
-  // --- Position Analysis (deep dive) ---
   {
     category: 'position_analysis',
     weight: 3,
     minTurn: 3,
-    build: (ctx) => `While we wait for the next move, give a brief position assessment.
+    build: (ctx) => `Topic lane: position read.
 
 Position (FEN): ${ctx.fen}
-Game: ${ctx.moveHistory.join(' ')}
-White: ${ctx.whiteModel} | Black: ${ctx.blackModel}
-${ctx.evalCp !== undefined ? `Eval: ${(ctx.evalCp / 100).toFixed(1)} (from White's perspective)` : ''}
+Recent game moves: ${moveWindow(ctx)}
+White: ${ctx.whiteModel}
+Black: ${ctx.blackModel}
+${evalText(ctx)}
 
-Talk about pawn structure, piece activity, or king safety. Keep it educational but brief — 3-5 sentences.`,
+Pick one concrete feature to talk about: pawn structure, king safety, one loose piece, one critical square, or one active piece. Do not try to cover everything.`,
   },
   {
     category: 'position_analysis',
     weight: 2,
     minTurn: 5,
-    build: (ctx) => `Analyze the key squares and piece placement in this position.
+    build: (ctx) => `Topic lane: board geometry.
 
 Position (FEN): ${ctx.fen}
-Game: ${ctx.moveHistory.join(' ')}
-${ctx.evalCp !== undefined ? `Eval: ${(ctx.evalCp / 100).toFixed(1)}` : ''}
+Recent game moves: ${moveWindow(ctx)}
+${evalText(ctx)}
 
-Focus on which squares are weak, which pieces are well-placed, and any imbalances. 3-5 sentences.`,
+Focus on one board zone or route that matters right now: a file, diagonal, outpost, weak square, or invasion path. Make it feel like live board reading, not a textbook summary.`,
   },
-
-  // --- Predictions ---
   {
     category: 'prediction',
     weight: 3,
     minTurn: 4,
-    build: (ctx) => `Predict what might happen next in this game.
+    build: (ctx) => `Topic lane: what comes next.
 
 Position (FEN): ${ctx.fen}
-Game so far: ${ctx.moveHistory.join(' ')}
-White: ${ctx.whiteModel} | Black: ${ctx.blackModel}
-${ctx.evalCp !== undefined ? `Eval: ${(ctx.evalCp / 100).toFixed(1)}` : ''}
+Recent game moves: ${moveWindow(ctx)}
+White: ${ctx.whiteModel}
+Black: ${ctx.blackModel}
+${evalText(ctx)}
 
-What plans might each side pursue? What are the critical decisions coming up? Speculate like a real commentator — 3-5 sentences.`,
+Speculate on one or two likely plans, candidate moves, or tactical worries. Be decisive and broadcaster-like, not hedged and generic.`,
   },
-
-  // --- Model Comparison ---
   {
     category: 'model_comparison',
     weight: 2,
     minTurn: 6,
-    build: (ctx) => `Compare how ${ctx.whiteModel} (White) and ${ctx.blackModel} (Black) have been playing so far.
+    build: (ctx) => `Topic lane: compare the players.
 
-Game: ${ctx.moveHistory.join(' ')} (${ctx.turnNumber} turns in)
-${ctx.evalCp !== undefined ? `Current eval: ${(ctx.evalCp / 100).toFixed(1)}` : ''}
+Recent game moves: ${moveWindow(ctx)}
+White: ${ctx.whiteModel}
+Black: ${ctx.blackModel}
+${evalText(ctx)}
 
-Comment on their styles, accuracy, and any interesting tendencies you've noticed. 3-5 sentences.`,
+Comment on style differences or decision quality so far. Keep it tied to this actual game, not generic AI commentary.`,
   },
-
-  // --- Game Recap ---
   {
     category: 'game_recap',
     weight: 2,
     minTurn: 8,
-    build: (ctx) => `Give the audience a quick recap of how we got here.
+    build: (ctx) => `Topic lane: story so far.
 
-Game: ${ctx.moveHistory.join(' ')}
-White: ${ctx.whiteModel} | Black: ${ctx.blackModel}
-${ctx.evalCp !== undefined ? `Current eval: ${(ctx.evalCp / 100).toFixed(1)}` : ''}
+Recent game moves: ${moveWindow(ctx)}
+White: ${ctx.whiteModel}
+Black: ${ctx.blackModel}
+${evalText(ctx)}
 
-Summarize the key moments and the story of the game so far. 3-5 sentences.`,
+Give a quick narrative recap, but organize it around one turning point or one unfinished tension rather than listing every phase.`,
   },
-
-  // --- Chess Education ---
   {
     category: 'chess_education',
     weight: 2,
     minTurn: 3,
     build: (ctx) => {
       const phase = ctx.turnNumber <= 10 ? 'opening' : ctx.turnNumber <= 30 ? 'middlegame' : 'endgame';
-      return `Teach the audience something about chess relevant to this ${phase} position.
+      return `Topic lane: teach one concept.
 
 Position (FEN): ${ctx.fen}
-Turn: ${ctx.turnNumber}
+Recent game moves: ${moveWindow(ctx)}
+Phase: ${phase}
 
-Pick one concept (e.g. a tactical motif, positional idea, famous game parallel, or common mistake) and explain it briefly. Make it feel relevant to what's happening. 3-5 sentences.`;
+Pick one concept that genuinely fits this position: overloading, weak squares, dark-square control, initiative, prophylaxis, pawn breaks, or a common tactical motif. Keep it practical.`;
     },
   },
   {
     category: 'chess_education',
     weight: 1,
-    build: (_ctx) => `Share a fun fact or piece of chess trivia that the audience might enjoy. Maybe about AI chess, famous games, unusual rules, or chess history. Keep it light and entertaining — 2-3 sentences.`,
-  },
+    build: (_ctx) => `Topic lane: chess culture.
 
-  // --- Channel Plugs ---
+Share one sharp or surprising chess-related nugget, but make it feel adjacent to the live game rather than random trivia. Keep it short and conversational.`,
+  },
+  {
+    category: 'thinking_update',
+    weight: 4,
+    build: (ctx) => {
+      const elapsedSec = Math.round((ctx.thinkingElapsedMs ?? 0) / 1000);
+      const model = ctx.thinkingModel ?? 'The model';
+      const effort = ctx.thinkingReasoningEffort ?? 'unknown';
+      return `Topic lane: thinking update.
+
+${model} has been thinking for about ${elapsedSec} seconds at ${effort} reasoning.
+Position (FEN): ${ctx.fen}
+Recent game moves: ${moveWindow(ctx, 10)}
+
+Do not just say the model is thinking. Explain one concrete thing it may be calculating here: a tactical line, a king-safety tradeoff, a pawn break, a forcing sequence, or a difficult evaluation choice.`;
+    },
+  },
+  {
+    category: 'thinking_update',
+    weight: 2,
+    build: (ctx) => {
+      const elapsedSec = Math.round((ctx.thinkingElapsedMs ?? 0) / 1000);
+      const model = ctx.thinkingModel ?? 'The model';
+      return `Topic lane: deep calculation.
+
+${model} is still in the tank at ${elapsedSec} seconds.
+Position (FEN): ${ctx.fen}
+${evalText(ctx)}
+
+Frame the long think as evidence that the position contains one hard decision. Name what kind of decision it is and why it is difficult.`;
+    },
+  },
   {
     category: 'channel_plug',
     weight: 1,
     build: (ctx) => {
       const info = ctx.channelInfo;
       if (!info) {
-        return `Give a brief, natural plug for the stream. Thank the viewers for watching this AI chess match between ${ctx.whiteModel} and ${ctx.blackModel}. Encourage them to stick around and enjoy the game. 2-3 sentences.`;
+        return `Topic lane: soft stream plug.
+
+Thank viewers for hanging out with this AI chess game between ${ctx.whiteModel} and ${ctx.blackModel}. Keep it warm and quick, and tie it back to the game instead of sounding like an ad read.`;
       }
-      const parts = [`Plug the stream naturally for ${info.channelName}.`];
-      if (info.website) parts.push(`Website: ${info.website}`);
-      if (info.socialLinks?.length) parts.push(`Social: ${info.socialLinks.join(', ')}`);
-      if (info.customPlugLines?.length) parts.push(`Also mention: ${info.customPlugLines.join('. ')}`);
-      parts.push(`Keep it brief and natural — 2-3 sentences. Don't sound like a commercial.`);
+      const parts = [
+        'Topic lane: soft stream plug.',
+        `Channel: ${info.channelName}`,
+        info.website ? `Website: ${info.website}` : '',
+        info.socialLinks?.length ? `Social: ${info.socialLinks.join(', ')}` : '',
+        info.customPlugLines?.length ? `Optional mentions: ${info.customPlugLines.join(' | ')}` : '',
+        'Make it feel casual and in-world, not like a scripted sponsor segment.',
+      ].filter(Boolean);
       return parts.join('\n');
     },
   },
-
-  // --- Audience Engagement / Donations ---
   {
     category: 'audience_engagement',
     weight: 1,
     build: (ctx) => {
       const info = ctx.channelInfo;
       if (info?.donationUrl) {
-        return `Encourage viewers to support the stream. Donation link: ${info.donationUrl}
-Mention that donations help keep these AI chess matches running (API costs, compute, etc.). Be warm and genuine, not pushy. 2-3 sentences.`;
+        return `Topic lane: audience support.
+
+Donation link: ${info.donationUrl}
+Game context: ${ctx.whiteModel} vs ${ctx.blackModel}
+
+Invite support briefly and genuinely, with one sentence connecting it to running live AI chess. Do not sound pushy.`;
       }
-      return `Engage the audience — ask them who they think is winning, what move they'd play, or if they're enjoying the match between ${ctx.whiteModel} and ${ctx.blackModel}. Be conversational. 2-3 sentences.`;
-    },
-  },
-  {
-    category: 'audience_engagement',
-    weight: 1,
-    minTurn: 5,
-    build: (ctx) => `Ask the audience a thought-provoking question about the game.
+      return `Topic lane: audience question.
 
 Position (FEN): ${ctx.fen}
-Game: ${ctx.moveHistory.join(' ')}
-White: ${ctx.whiteModel} | Black: ${ctx.blackModel}
+Recent game moves: ${moveWindow(ctx)}
 
-Maybe ask who they think will win, what they'd play in this position, or which AI model has impressed them more. 2-3 sentences.`,
+Ask viewers one specific question they could actually answer about the current position, likely plan, or which side they trust more.`;
+    },
   },
 ];
 
-/**
- * Pick a filler prompt, avoiding the same category back-to-back.
- */
 export function pickFillerPrompt(
   ctx: FillerContext,
   lastCategory?: FillerCategory,
 ): { template: FillerPromptTemplate; messages: ChatMessage[] } | null {
-  // Filter eligible templates
-  const eligible = TEMPLATES.filter(t => {
-    if (t.minTurn && ctx.turnNumber < t.minTurn) return false;
-    if (t.category === lastCategory) return false;
-    // Channel plugs/donations only if channel info exists or using generic
+  const recentCategories = ctx.recentFillerCategories ?? [];
+  const recentTexts = ctx.recentFillerTexts ?? [];
+  const blockedRecent = new Set(recentCategories.slice(-2));
+
+  const baseEligible = TEMPLATES.filter((template) => {
+    if (template.minTurn && ctx.turnNumber < template.minTurn) return false;
+    if (template.category === 'thinking_update' && (!ctx.thinkingElapsedMs || ctx.thinkingElapsedMs < 15000)) return false;
     return true;
   });
 
-  if (eligible.length === 0) return null;
+  const preferredPool = baseEligible.filter((template) => template.category !== lastCategory && !blockedRecent.has(template.category));
+  const fallbackPool = baseEligible.filter((template) => template.category !== lastCategory);
+  const pool = preferredPool.length > 0 ? preferredPool : fallbackPool;
+  if (pool.length === 0) return null;
 
-  // Weighted random selection
-  const totalWeight = eligible.reduce((sum, t) => sum + t.weight, 0);
+  const totalWeight = pool.reduce((sum, template) => sum + template.weight, 0);
   let roll = Math.random() * totalWeight;
-  let selected = eligible[0];
-  for (const t of eligible) {
-    roll -= t.weight;
+  let selected = pool[0];
+  for (const template of pool) {
+    roll -= template.weight;
     if (roll <= 0) {
-      selected = t;
+      selected = template;
       break;
     }
   }
 
-  const userContent = selected.build(ctx);
+  const styleAngle = FILLER_STYLE_ANGLES[Math.floor(Math.random() * FILLER_STYLE_ANGLES.length)];
+  const recentLines = recentTexts.slice(-2).map((text, index) => `${index + 1}. "${text}"`).join('\n');
+  const continuity = [
+    ctx.prevCommentary ? `Recent real game commentary: "${ctx.prevCommentary}"` : '',
+    recentCategories.length > 0 ? `Recent filler categories to avoid echoing: ${recentCategories.slice(-3).join(', ')}` : '',
+    recentLines ? `Recent filler lines to avoid echoing:\n${recentLines}` : '',
+    `Style target: ${styleAngle}.`,
+    'Improvise freely inside the requested topic lane. Do not sound canned.',
+  ].filter(Boolean).join('\n\n');
 
   return {
     template: selected,
     messages: [
       { role: 'system', content: FILLER_SYSTEM_PROMPT },
-      { role: 'user', content: userContent },
+      { role: 'user', content: `${selected.build(ctx)}\n\n${continuity}` },
     ],
   };
 }

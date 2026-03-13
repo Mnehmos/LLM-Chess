@@ -25,6 +25,9 @@ export interface TtsSynthesizeOptions {
 }
 
 const DEFAULT_PORT = 9877;
+const LOCAL_TTS_TIMEOUT_MS = 15000;
+const CLOUD_TTS_TIMEOUT_MS = 20000;
+const AUDIO_FETCH_TIMEOUT_MS = 15000;
 
 function localBaseUrl(port?: number): string {
   return `http://localhost:${port || DEFAULT_PORT}`;
@@ -65,6 +68,7 @@ async function synthesizeQwenCloud(text: string, apiKey: string, voice: string):
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
+    signal: AbortSignal.timeout(CLOUD_TTS_TIMEOUT_MS),
     body: JSON.stringify({
       model: 'qwen3-tts-flash',
       input: {
@@ -104,7 +108,9 @@ async function synthesizeQwenCloud(text: string, apiKey: string, voice: string):
 
   // Otherwise fetch the audio URL
   if (audio.url) {
-    const audioResp = await fetch(audio.url);
+    const audioResp = await fetch(audio.url, {
+      signal: AbortSignal.timeout(AUDIO_FETCH_TIMEOUT_MS),
+    });
     if (!audioResp.ok) throw new Error(`Failed to fetch audio URL: ${audioResp.status}`);
     return audioResp.arrayBuffer();
   }
@@ -123,6 +129,7 @@ async function synthesizeOpenAI(text: string, apiKey: string, voice: string): Pr
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
+    signal: AbortSignal.timeout(CLOUD_TTS_TIMEOUT_MS),
     body: JSON.stringify({
       model: 'tts-1',
       input: text,
@@ -146,6 +153,7 @@ async function synthesizeLocal(text: string, options: TtsSynthesizeOptions): Pro
   const response = await fetch(`${localBaseUrl(options.port)}/synthesize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(LOCAL_TTS_TIMEOUT_MS),
     body: JSON.stringify({
       text,
       language: options.language || 'English',
@@ -170,7 +178,9 @@ async function synthesizeLocal(text: string, options: TtsSynthesizeOptions): Pro
  */
 export async function checkTtsHealth(port?: number): Promise<TtsStatus> {
   try {
-    const response = await fetch(`${localBaseUrl(port)}/health`);
+    const response = await fetch(`${localBaseUrl(port)}/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
     if (!response.ok) {
       return { running: false, port: port || DEFAULT_PORT, model: null, error: `HTTP ${response.status}` };
     }
@@ -220,7 +230,9 @@ export async function listTtsVoices(port?: number, provider?: TtsProvider): Prom
 
   // Local sidecar voices
   try {
-    const response = await fetch(`${localBaseUrl(port)}/voices`);
+    const response = await fetch(`${localBaseUrl(port)}/voices`, {
+      signal: AbortSignal.timeout(5000),
+    });
     if (!response.ok) return [];
     return await response.json() as TtsVoice[];
   } catch {

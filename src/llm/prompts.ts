@@ -345,6 +345,8 @@ export function buildChessPrompt(player: PlayerConfig, context: TurnContext): Ch
 
 export interface CommentaryContext {
   fen: string;
+  /** Position after the move was played. Used for consequence framing only. */
+  resultingFen?: string;
   lastMove: string;
   lastMoveColor: 'w' | 'b';
   whiteModel: string;
@@ -364,6 +366,9 @@ export interface CommentaryContext {
   };
   // Previous eval for detecting blunders
   prevEvalCp?: number;
+  // Actual engine first choice from the BEFORE position, when available.
+  preMoveBestMove?: string;
+  preMoveBestMoveSan?: string;
   // Previous commentary for continuity
   prevCommentary?: string;
   // Optional user question for interactive Q&A.
@@ -376,6 +381,10 @@ export interface CommentaryContext {
   systemPromptOverride?: string;
   /** Verbosity level — controls commentary depth and length. */
   verbosity?: import('../engine/types').CommentaryVerbosity;
+  /** Illegal moves the model tried before landing on this one (2+ = notable struggle). */
+  illegalMovesAttempted?: string[];
+  /** True if this model's output format was auto-downgraded from json_schema this session. */
+  formatDowngraded?: boolean;
 }
 
 const COMMENTATOR_SYSTEM_PROMPT_BASE = `You are an expert chess commentator and teacher providing detailed analysis of a game between AI models (and possibly humans or engines). You have access to Stockfish engine evaluation.
@@ -394,13 +403,29 @@ EVALUATION RULES:
 - Only flag a move as significant if the eval changes by 1.0+ pawns in the WRONG direction for the mover (blunder) or RIGHT direction (brilliant).
 - Do NOT say "tables are turning" or "momentum shifts" for normal eval fluctuations between turns.
 
+ENGINE CONTEXT LIMITATION:
+- You are NOT given the engine's pre-move first choice for the side that just moved.
+- The engine move you see is ONLY the best reply from the resulting position AFTER the played move.
+- Never say the played move "matches", "misses", or "differs from" the engine's first choice unless a separate pre-move engine alternative is explicitly provided.
+- Judge the played move using eval delta, position quality, and the resulting-position best reply only.
+- If a separate "engine first choice from the BEFORE position" is explicitly provided, you MAY compare the played move against it.
+
 BOARD ANNOTATIONS — Draw on the board with inline tags (stripped from speech/display automatically):
 - [arrow e2 e4] or [arrow e2 e4 red] — arrow between squares (colors: green, red, yellow, blue, orange, purple, white, cyan)
 - [highlight d5] or [highlight d5 red] — highlight a square
 - [circle f3] or [circle f3 blue] — circle a square
 Use 1-3 annotations per commentary to show threats, plans, or key squares. Place tags at the END of the sentence they relate to — NEVER inside a phrase. Text must read naturally if tags are removed.
 GOOD: "The knight controls key central squares [arrow f3 d4 green] [arrow f3 e5 green]."
-BAD: "The knight controls [highlight d4] and [highlight e5] central squares."`;
+BAD: "The knight controls [highlight d4] and [highlight e5] central squares."
+
+NATURAL-LANGUAGE ANNOTATION SCHEMA:
+- When you name board geometry in prose, prefer these exact canonical forms:
+  - piece placement: "queen on d2", "knight on f5"
+  - piece movement: "queen to d2", "bishop from c4 to d5"
+  - square focus: "pressure on f7", "targeting d6", "defending f7", "covering e4", "weak square e5"
+  - lines and routes: "line from d2 to h6", "diagonal c2 to h7", "file on e-file"
+- Keep prose natural, but use this vocabulary exactly when you want the board parser to pick it up.
+- Tags remain optional and higher precision. The natural-language schema is additive, not a replacement.`;
 
 const COMMENTATOR_STYLE_RICH = `
 COMMENTARY STYLE — Be thorough and educational:
@@ -408,8 +433,9 @@ COMMENTARY STYLE — Be thorough and educational:
 2. Explain the strategic idea behind the move.
 3. Teach positional concepts when relevant: pawn structure, piece activity, king safety, space advantage.
 4. Highlight tactical motifs when they appear: pins, forks, skewers, discovered attacks.
-5. Compare to the engine's best move when the played move differs significantly.
-6. Look ahead — what are the critical decisions coming up?
+5. Use eval delta to judge move quality first. Treat the resulting-position best reply as optional downstream context, not the main lens.
+6. Do not lead normal commentary with "the engine preferred..." unless that reply is genuinely the clearest way to explain the move's consequence.
+7. Look ahead — what are the critical decisions coming up?
 
 FORMAT — Use rich Markdown:
 - Use **bold** for key terms and player names
@@ -426,12 +452,14 @@ COMMENTARY STYLE — Live spoken broadcast narration:
 1. Cover the move with good analysis — name the strategic idea, explain why it matters, note key consequences.
 2. 3-5 sentences. Enough to teach, not so much you ramble.
 3. Conversational, punchy sentences. Natural speech rhythm.
-4. ALWAYS reference the engine's recommended move and compare it to what was played. If they match, say so briefly. If they differ, explain why the deviation was good, neutral, or a mistake.
-5. Narration pace controls the stream — the audience sees what you describe when you describe it.
+4. Default to explaining the played move on its own merits from the board before the move.
+5. You may reference the engine's best reply from the resulting position only when it clearly illustrates the consequence of the move. Do NOT claim the played move matched or missed an engine first choice unless that pre-move alternative was explicitly provided.
+6. Narration pace controls the stream — the audience sees what you describe when you describe it.
 
 FORMAT — Plain spoken text ONLY:
 - NO markdown (no bold, italics, code blocks, blockquotes)
-- ALWAYS use standard algebraic notation exactly as given (Nf3, Bxe5, O-O, e4). Never paraphrase as "knight to f3".
+- ALWAYS use standard algebraic notation exactly as given (Nf3, Bxe5, O-O, e4) when naming the actual played move.
+- You MAY use the natural-language annotation schema for board ideas and geometry, such as "queen on d2", "pressure on f7", or "line from d2 to h6".
 - Numbers spoken naturally: "plus one point five" not "+1.50"
 
 Filler commentary handles extended analysis, education, and audience engagement between your move commentaries.`;
@@ -486,9 +514,9 @@ export function buildCommentaryPrompt(ctx: CommentaryContext): ChatMessage[] {
   const opponentColor = ctx.lastMoveColor === 'w' ? 'Black' : 'White';
 
   const parts = [
-    `Position (FEN): ${ctx.fen}`,
+    `Position BEFORE the move (FEN): ${ctx.fen}`,
     '',
-    'Board:',
+    'Board BEFORE the move:',
     fenToAsciiBoard(ctx.fen),
     '',
     `Move ${ctx.turnNumber}: ${mover} (${moverColor}) played ${ctx.lastMove}${ctx.isCheck && !ctx.lastMove.includes('+') ? '+' : ''}${ctx.isCapture ? ' (capture)' : ''}`,
@@ -496,6 +524,11 @@ export function buildCommentaryPrompt(ctx: CommentaryContext): ChatMessage[] {
     '',
     `Full game so far: ${ctx.moveHistory.join(' ')}`,
   ];
+
+  if (ctx.resultingFen) {
+    parts.push('', `Resulting position AFTER the move (FEN): ${ctx.resultingFen}`);
+    parts.push('IMPORTANT: Explain why the move was chosen from the BEFORE position above. Use the resulting position only to describe consequences.');
+  }
 
   // Add Stockfish evaluation with clear framing
   if (ctx.stockfishEval) {
@@ -524,9 +557,18 @@ export function buildCommentaryPrompt(ctx: CommentaryContext): ChatMessage[] {
     parts.push('', `--- Stockfish (depth ${ev.depth}) ---`);
     parts.push(`Eval: ${evalStr} (always from White's perspective)`);
     parts.push(`Position: ${positionSummary}`);
-    parts.push(`Engine's top move: ${ev.bestMove} (UCI notation)`);
-    parts.push(`Best line (PV): ${ev.pv}`);
-    parts.push(`Player played: ${ctx.lastMove} — always compare this to the engine's top move above and explain if it matches, deviates, or is a blunder/brilliancy.`);
+    const nextMover = ctx.lastMoveColor === 'w' ? 'Black' : 'White';
+    parts.push(`Possible best reply from the resulting position: ${ev.bestMove} (UCI — this is ${nextMover}'s recommended reply AFTER ${ctx.lastMove} was played, NOT an alternative to ${ctx.lastMove})`);
+    parts.push(`Principal variation: ${ev.pv}`);
+    parts.push(`IMPORTANT: The eval and reply above reflect the position AFTER ${ctx.lastMove}. Judge move quality using the eval delta (prev vs current score), not by comparing ${ctx.lastMove} to the reply shown above.`);
+    if (ctx.preMoveBestMove) {
+      const preMoveLabel = ctx.preMoveBestMoveSan ? `${ctx.preMoveBestMoveSan} (${ctx.preMoveBestMove})` : ctx.preMoveBestMove;
+      parts.push(`Engine first choice from the BEFORE position for ${moverColor}: ${preMoveLabel}`);
+      parts.push(`You may compare ${ctx.lastMove} to that actual pre-move engine choice above, because it was explicitly provided.`);
+    } else {
+      parts.push(`Do NOT claim ${ctx.lastMove} matched or missed an engine first choice for ${moverColor}; that pre-move alternative was not provided.`);
+    }
+    parts.push(`If the eval shift is routine, explain the move's idea directly and mention engine lines only when they teach a concrete consequence.`);
 
     // Detect actual blunders/brilliancies using directional delta
     if (ctx.prevEvalCp !== undefined) {
@@ -560,6 +602,14 @@ export function buildCommentaryPrompt(ctx: CommentaryContext): ChatMessage[] {
     }
   }
 
+  // Notable model behavior (for commentary flavor)
+  if (ctx.illegalMovesAttempted && ctx.illegalMovesAttempted.length >= 2) {
+    parts.push('', `NOTABLE: Before playing this move, ${mover} (${moverColor}) required ${ctx.illegalMovesAttempted.length} attempts. Illegal/failed attempts: ${ctx.illegalMovesAttempted.join(', ')}. This is worth mentioning — the model struggled to find a legal move.`);
+  }
+  if (ctx.formatDowngraded) {
+    parts.push(`NOTABLE: ${mover}'s output format was automatically downgraded this game (it failed to produce valid structured output). You may mention this as a sign of the model's behavior under pressure.`);
+  }
+
   if (ctx.userQuestion) {
     parts.push('', `User question: ${ctx.userQuestion}`);
     parts.push('Answer the user question directly and concretely. Use markdown and cite specific moves/ideas from this position.');
@@ -575,6 +625,52 @@ export function buildCommentaryPrompt(ctx: CommentaryContext): ChatMessage[] {
 
 // --- Retry prompt ---
 
+/** Describes why the model's previous move attempt failed. */
+export type RetryReason =
+  | { kind: 'illegal'; move: string }   // model played an illegal move
+  | { kind: 'empty' }                   // model returned empty content (e.g. finish_reason=length)
+  | { kind: 'parse_error' };            // model returned unparseable content
+
+/**
+ * Build a contextually appropriate retry prompt based on why the previous attempt failed.
+ * Produces a more targeted message than the generic "ILLEGAL" prompt.
+ */
+export function buildRetryPromptForReason(
+  player: PlayerConfig,
+  context: TurnContext,
+  reason: RetryReason,
+): ChatMessage[] {
+  const messages = buildChessPrompt(player, context);
+  const legalList = context.legalMoves.join(', ');
+
+  if (reason.kind === 'illegal') {
+    return buildRetryPrompt(player, context, reason.move);
+  }
+
+  if (reason.kind === 'empty') {
+    // Do NOT reuse the full chess prompt — that's why the model ran out of tokens.
+    // Send a minimal system + one-line user prompt so the model can respond immediately.
+    const colorName = context.color === 'w' ? 'White' : 'Black';
+    return [
+      {
+        role: 'system' as const,
+        content: 'You are playing chess. Output only valid JSON. Be extremely brief.',
+      },
+      {
+        role: 'user' as const,
+        content: `Chess position (FEN): ${context.fen}\nYou are ${colorName}. Legal moves: ${legalList}\nYour previous response was cut off. Output ONLY: {"move": "<san>"} where <san> is one of the legal moves above. No reasoning.`,
+      },
+    ];
+  }
+
+  // parse_error
+  messages.push({
+    role: 'user',
+    content: `Your previous response could not be parsed as a valid move. Output ONLY: {"move": "<san>"} where <san> is one of: ${legalList}. No extra text.`,
+  });
+  return messages;
+}
+
 export function buildRetryPrompt(
   player: PlayerConfig,
   context: TurnContext,
@@ -588,19 +684,270 @@ export function buildRetryPrompt(
 
   // Append the illegal move as a failed assistant attempt, then a correction user message
   const retryObj = isActFirst
-    ? { move: previousIllegalMove, reasoning: 'I attempted this move.' }
-    : { reasoning: 'I attempted this move.', move: previousIllegalMove };
+    ? { move: previousIllegalMove, reasoning: 'Previous attempt was illegal. Reanalyzing from scratch.' }
+    : { reasoning: 'Previous attempt was illegal. Reanalyzing from scratch.', move: previousIllegalMove };
   messages.push({
     role: 'assistant',
     content: JSON.stringify(retryObj),
   });
 
   const retryContent = (level === 'p0' || level === 'p1') && !toggles.showLegalMoves
-    ? `"${previousIllegalMove}" is ILLEGAL. Carefully re-read the FEN and determine the legal moves yourself.`
-    : `"${previousIllegalMove}" is ILLEGAL. You MUST choose from these legal moves ONLY: ${context.legalMoves.join(', ')}`;
+    ? `"${previousIllegalMove}" is ILLEGAL. Re-analyze the position from scratch, carefully re-read the FEN, and produce a fresh full response with updated reasoning and a legal move.`
+    : `"${previousIllegalMove}" is ILLEGAL. Re-analyze from scratch and produce a fresh full response with updated reasoning. You MUST choose from these legal moves ONLY: ${context.legalMoves.join(', ')}`;
   messages.push({
     role: 'user',
     content: retryContent,
   });
   return messages;
+}
+
+// ---- Puzzle Break ----
+
+export function buildPuzzlePrompt(
+  puzzle: { fen: string; rating: number; themes: string[]; solution: string[] },
+  thinkingModelName: string,
+  elapsedMs: number,
+): ChatMessage[] {
+  const elapsedSec = Math.round(elapsedMs / 1000);
+  const themeList = puzzle.themes.slice(0, 4).join(', ');
+  return [
+    {
+      role: 'system',
+      content: `You are a live chess stream host with hands — you can physically move pieces on the board, draw arrows, and highlight squares for the audience. Solve the puzzle turn by turn: explain each move in 1-2 sentences of plain conversational prose, then place it with [move from to] (e.g. [move f3 g5]). Use board annotations to teach visually: [arrow e2 e4] draws a green arrow, [highlight d5] highlights a square, [circle f3] circles one. Place annotation tags at the end of sentences — text reads naturally without them. No markdown. Sound like an engaged broadcaster.`,
+    },
+    {
+      role: 'user',
+      content: `While ${thinkingModelName} ponders their next move (${elapsedSec} seconds so far), let's solve a puzzle for the audience!
+
+Position (FEN): ${puzzle.fen}
+Rating: ${puzzle.rating} | Themes: ${themeList}
+Solution (UCI): ${puzzle.solution.join(', ')}
+
+Walk through each move one at a time. For each: explain the idea, annotate any key squares or threats with [arrow]/[highlight], then play the move with [move from to]. Alternate sides. After the final move, confirm it's solved. Keep it under 220 words total.`,
+    },
+  ];
+}
+
+/**
+ * Per-turn prompt for the multi-turn puzzle break flow.
+ * Called once per model turn (solutionIdx 0, 2, 4…).
+ * Gives the model the current FEN, the correct move to demonstrate, and past context.
+ */
+export function buildPuzzleTurnPrompt(
+  puzzle: { fen: string; rating: number; themes: string[]; solution: string[] },
+  currentFen: string,
+  solutionIdx: number,
+  pastTurns: Array<{ isModel: boolean; san: string; commentary: string }>,
+): ChatMessage[] {
+  const themeList = puzzle.themes.slice(0, 4).join(', ');
+  const modelTurnNumber = Math.floor(solutionIdx / 2) + 1;
+  const totalModelMoves = Math.ceil(puzzle.solution.length / 2);
+  const thisUci = puzzle.solution[solutionIdx];
+
+  const pastContext = pastTurns.length > 0
+    ? '\n\nSo far:\n' + pastTurns.map(t =>
+        t.isModel
+          ? `▶ You played ${t.san} — ${t.commentary || '(no commentary)'}`
+          : `⚡ Opponent replied ${t.san}`,
+      ).join('\n')
+    : '';
+
+  const isLast = solutionIdx === puzzle.solution.length - 1;
+  const closingNote = isLast
+    ? ' This is the final move — confirm the puzzle is solved and summarize what made this combination work.'
+    : '';
+
+  return [
+    {
+      role: 'system',
+      content: `You are a live chess stream host with hands — you can physically move pieces on the board, draw arrows, and highlight squares for the audience.\n\nYour job this turn: explain in 1-3 sentences WHY the move is strong, annotate visually, then physically play it.\n\nCommands (embed in your prose):\n- [move e2 e4] to play a piece (required — always end your turn with this)\n- [arrow e2 e4] to draw a green arrow\n- [highlight d5] to highlight a key square\n- [circle f3] to circle a piece\n\nNo markdown. Sound like an engaged broadcaster. Be concise.`,
+    },
+    {
+      role: 'user',
+      content: `Puzzle ★${puzzle.rating} | ${themeList}${pastContext}\n\nCurrent position (FEN): ${currentFen}\n\nMove ${modelTurnNumber} of ${totalModelMoves}: The correct move is ${thisUci} (UCI). Explain the idea, annotate key squares, then play it with [move].${closingNote}`,
+    },
+  ];
+}
+
+export function buildPuzzleBreakIntroPrompt(
+  thinkingModelName: string,
+  thinkingReasoningEffort: string,
+): ChatMessage[] {
+  const normalizedEffort = thinkingReasoningEffort === 'xhigh' ? 'extra-high' : thinkingReasoningEffort;
+  const introAngles = [
+    'lean into broadcast anticipation',
+    'sound playful and lightly teasing',
+    'frame it like a quick tactical detour',
+    'make it feel like a live producer toss to a feature segment',
+    'keep it dry and confident, not jokey',
+  ];
+  const bannedPhrases = [
+    'while we wait',
+    'quick puzzle break',
+    'brought-to-you-by',
+    'slip into',
+    'these models take a little longer',
+  ];
+  const angle = introAngles[Math.floor(Math.random() * introAngles.length)];
+  return [
+    {
+      role: 'system',
+      content: 'You are a live chess commentator. Deliver a short spoken segue into a pop-up puzzle segment while another model thinks. No markdown. Keep it to 2 sentences. Vary your phrasing. Do not sound canned, promotional, or repetitive.',
+    },
+    {
+      role: 'user',
+      content: `The live game is waiting on ${thinkingModelName}, which is using ${normalizedEffort} reasoning. In a conversational broadcast tone, toss to a puzzle segment and make the wording feel fresh. Style target: ${angle}. Avoid these phrases entirely: ${bannedPhrases.join(', ')}.`,
+    },
+  ];
+}
+
+export function buildPuzzleSetupPrompt(
+  puzzle: { fen: string; rating: number; themes: string[] },
+  currentFen: string,
+  oracleContext?: string,
+): ChatMessage[] {
+  const themeList = puzzle.themes.slice(0, 4).join(', ');
+  const sideToMove = currentFen.split(' ')[1] === 'w' ? 'White' : 'Black';
+  const hostColor = puzzle.fen.split(' ')[1] === 'w' ? 'White' : 'Black';
+  const defendingColor = hostColor === 'White' ? 'Black' : 'White';
+  return [
+    {
+      role: 'system',
+      content: 'You are the live chess commentator for a pop-up puzzle break. Start the response with exactly "<Color> to move." Then give the audience a rich setup read on the position before the tactic starts. Frame the position from the perspective of the winning side: explain the tactical motif, the strategic imbalance, the loose pieces or weak squares, and the defensive resources that are failing. If Stockfish oracle context is provided, treat it as ground truth for the evaluation, best line, and credible alternatives. Use the legal move list to mention one or two serious candidate tries, but keep the spotlight on the puzzle idea rather than listing moves mechanically. If you mention the engine line, summarize only the key branch or first 2-4 plies in prose; never dump a long SAN chain. Sound like a strong live analyst: focus on what squares matter, what piece becomes more active or passive, what pawn break or tactical route is being prepared, and why the move changes the character of the position. Be concrete and instructive, like a strong coach or engine explainer, but do not reveal the exact first move yet. Do not restate the FEN, do not list pieces square by square, and do not narrate the board mechanically. Aim for 4-6 sentences. Prefer at least one visual board annotation whenever there is a concrete square, piece, diagonal, file, or mating net to point out. You may add board annotations in exact tag syntax like [highlight g8], [circle f7], [arrow d2 h6], and you should also prefer canonical natural-language geometry phrases like "queen on d2", "pressure on f7", "bishop from c4 to d5", or "line from d2 to h6" when they fit naturally. Do not invent synonyms if you want the board parser to catch the idea. Do not use XML-style tags like [highlight]g8[/highlight]. Do not use [move]. No markdown.',
+    },
+    {
+      role: 'user',
+      content: `Puzzle ★${puzzle.rating} | ${themeList}\n\nCurrent position (FEN): ${currentFen}\n\n${sideToMove} is to move. ${hostColor} is the attacking side and ${defendingColor} is defending. Set up the tactic for the audience without giving away the first move.${oracleContext ? `\n\nStockfish oracle context:\n${oracleContext}` : ''}`,
+    },
+  ];
+}
+
+export function buildPuzzleCommentaryTurnPrompt(
+  puzzle: { fen: string; rating: number; themes: string[]; solution: string[] },
+  currentFen: string,
+  solutionIdx: number,
+  pastTurns: Array<{ side: 'w' | 'b'; san: string; commentary: string }>,
+): ChatMessage[] {
+  const themeList = puzzle.themes.slice(0, 4).join(', ');
+  const sideToMove = currentFen.split(' ')[1] === 'w' ? 'White' : 'Black';
+  const hostColor = puzzle.fen.split(' ')[1] === 'w' ? 'White' : 'Black';
+  const defendingColor = hostColor === 'White' ? 'Black' : 'White';
+  const thisUci = puzzle.solution[solutionIdx];
+  const moveNumber = solutionIdx + 1;
+  const totalMoves = puzzle.solution.length;
+  const pastContext = pastTurns.length > 0
+    ? '\n\nSo far:\n' + pastTurns.map(t => `${t.side === 'w' ? 'White' : 'Black'} played ${t.san} — ${t.commentary || '(no commentary)'}`).join('\n')
+    : '';
+  const isLast = solutionIdx === puzzle.solution.length - 1;
+  const moverPerspective = sideToMove === hostColor
+    ? `${hostColor} is the winning side here, so reinforce how this move advances the attack or conversion.`
+    : `${sideToMove} is defending here, so explain the move as forced resistance, damage control, or the best practical try against the tactic.`;
+
+  return [
+    {
+      role: 'system',
+      content: `You are the live chess commentator for a pop-up puzzle break. Walk the audience through every move in order. ${hostColor} is the winning puzzle side and ${defendingColor} is defending. ${moverPerspective} Be concrete: explain the tactical point, the strategic consequence, the forcing nature of the move, and when useful mention the best defensive alternative or why the reply is forced. Sound like a strong analyst, not a generic host. Do not restate the full board or talk in vague filler. Aim for 3-5 sentences when there is real content. Prefer 1-3 visual annotations whenever there is a concrete route, target square, pinned piece, mating net, or overloaded defender to show. Add useful annotations, and end with exactly one [move from to] tag so the board can advance. The move tag must encode the exact instructed move ${thisUci} and no other move. Allowed annotation syntax only: [highlight g8], [circle f7], [arrow d2 h6]. Also prefer canonical natural-language geometry phrases like "queen on d2", "queen to d2", "pressure on f7", "targeting d6", or "line from d2 to h6" when they fit naturally. Do not invent synonyms if you want the board parser to catch the idea. Do not use XML-style tags like [highlight]g8[/highlight]. No markdown.`,
+    },
+    {
+      role: 'user',
+      content: `Puzzle ★${puzzle.rating} | ${themeList}${pastContext}\n\nCurrent position (FEN): ${currentFen}\n\nMove ${moveNumber} of ${totalMoves}. ${sideToMove} to move. The correct move is ${thisUci} (UCI). Narrate it like a host guiding viewers through the tactic.${isLast ? ' After this move, confirm the puzzle is solved.' : ''}`,
+    },
+  ];
+}
+
+export function buildPuzzleOutroPrompt(
+  puzzle: { fen: string; rating: number; themes: string[] },
+  solvedTurns: Array<{ side: 'w' | 'b'; san: string; commentary: string }>,
+): ChatMessage[] {
+  const themeList = puzzle.themes.slice(0, 4).join(', ');
+  const hostColor = puzzle.fen.split(' ')[1] === 'w' ? 'White' : 'Black';
+  const defendingColor = hostColor === 'White' ? 'Black' : 'White';
+  const lineSummary = solvedTurns.map(t => `${t.side === 'w' ? 'White' : 'Black'}: ${t.san}`).join(', ');
+  return [
+    {
+      role: 'system',
+      content: `You are a live chess commentator closing out a pop-up puzzle break. In 2-3 sentences, summarize the key tactical motif, the strategic point of the line, and how ${defendingColor} ran out of resources before segueing back to the live broadcast. Sound insightful, not generic. If you annotate, use only this exact syntax: [highlight g8], [circle f7], [arrow d2 h6]. Do not use XML-style tags like [highlight]g8[/highlight]. Do not use [move]. Do not use markdown.`,
+    },
+    {
+      role: 'user',
+      content: `The puzzle is solved. Puzzle ★${puzzle.rating} | ${themeList}\n\nSolution line: ${lineSummary || '(none)'}\n\nGive a quick wrap-up for the audience and bridge back to the live game.`,
+    },
+  ];
+}
+
+export function buildPuzzleSetupPromptWithOracle(
+  puzzle: { fen: string; rating: number; themes: string[] },
+  currentFen: string,
+  oracleContext?: string,
+): ChatMessage[] {
+  const themeList = puzzle.themes.slice(0, 4).join(', ');
+  const sideToMove = currentFen.split(' ')[1] === 'w' ? 'White' : 'Black';
+  return [
+    {
+      role: 'system',
+      content: `${getCommentatorSystemPrompt(true, 'detailed')}\n\nYou are currently hosting a pop-up puzzle break, but you should sound like the same main broadcast commentator. Start the response with exactly "<Color> to move." Then give the audience a rich setup read on the position before the tactic starts. Frame the position from the perspective of the winning side: explain the tactical motif, the strategic imbalance, the loose pieces or weak squares, and the defensive resources that are failing. If Stockfish oracle context is provided, treat it as ground truth for the evaluation, best line, and credible alternatives. Use the legal move list to mention one or two serious candidate tries, but keep the spotlight on the puzzle idea rather than listing moves mechanically. Be concrete and instructive, like a strong coach or engine explainer, but do not reveal the exact first move yet. Do not restate the FEN, do not list pieces square by square, and do not narrate the board mechanically. Prefer at least one visual board annotation whenever there is a concrete square, piece, diagonal, file, or mating net to point out. You may add board annotations in exact tag syntax like [highlight g8], [circle f7], [arrow d2 h6], and you should also prefer canonical natural-language geometry phrases like "queen on d2", "pressure on f7", "bishop from c4 to d5", or "line from d2 to h6" when they fit naturally. Do not invent synonyms if you want the board parser to catch the idea. Do not use XML-style tags like [highlight]g8[/highlight]. Do not use [move]. No markdown.`,
+    },
+    {
+      role: 'user',
+      content: `Puzzle ${puzzle.rating} | ${themeList}\n\nCurrent position (FEN): ${currentFen}\n\n${sideToMove} is to move. Set up the tactic for the audience without giving away the first move.${oracleContext ? `\n\nStockfish oracle context:\n${oracleContext}` : ''}`,
+    },
+  ];
+}
+
+export function buildPuzzleCommentaryTurnPromptWithOracle(
+  puzzle: { fen: string; rating: number; themes: string[]; solution: string[] },
+  currentFen: string,
+  solutionIdx: number,
+  pastTurns: Array<{ side: 'w' | 'b'; san: string; commentary: string }>,
+  oracleContext?: string,
+): ChatMessage[] {
+  const themeList = puzzle.themes.slice(0, 4).join(', ');
+  const sideToMove = currentFen.split(' ')[1] === 'w' ? 'White' : 'Black';
+  const hostColor = puzzle.fen.split(' ')[1] === 'w' ? 'White' : 'Black';
+  const defendingColor = hostColor === 'White' ? 'Black' : 'White';
+  const thisUci = puzzle.solution[solutionIdx];
+  const moveNumber = solutionIdx + 1;
+  const totalMoves = puzzle.solution.length;
+  const recentTurns = pastTurns.slice(-2);
+  const pastContext = recentTurns.length > 0
+    ? '\n\nRecent line so far:\n' + recentTurns
+      .map((t) => `${t.side === 'w' ? 'White' : 'Black'} played ${t.san}.`)
+      .join('\n')
+    : '';
+  const isLast = solutionIdx === puzzle.solution.length - 1;
+  const moverPerspective = sideToMove === hostColor
+    ? `${hostColor} is the winning side here, so reinforce how this move advances the attack or conversion.`
+    : `${sideToMove} is defending here, so explain the move as forced resistance, damage control, or the best practical try against the tactic.`;
+
+  return [
+    {
+      role: 'system',
+      content: `${getCommentatorSystemPrompt(true, 'detailed')}\n\nYou are currently hosting a pop-up puzzle break, but you should sound like the same main broadcast commentator. Walk the audience through every move in order. ${hostColor} is the winning puzzle side and ${defendingColor} is defending. ${moverPerspective} If Stockfish oracle context is provided, use it as hard evidence: reference the evaluation, the principal variation, the move quality, and the serious alternatives from the legal move list. Use that oracle context to explain why this move is best, forced, or inferior, but still keep the narration centered on the puzzle's intended line. Mention the engine line only as a short tactical branch or first 2-4 key plies, and explain the idea in prose; never recite a long SAN list. Lead with what the move does to the position: which squares become critical, which piece becomes active or overloaded, what line or file opens, what defender is removed, and what threat is now in the air. Do not restate the full board or talk in vague filler. Prefer 1-3 visual annotations whenever there is a concrete route, target square, pinned piece, mating net, or overloaded defender to show. Add useful annotations, and end with exactly one [move from to] tag so the board can advance. The move tag must encode the exact instructed move ${thisUci} and no other move. Allowed annotation syntax only: [highlight g8], [circle f7], [arrow d2 h6]. Also prefer canonical natural-language geometry phrases like "queen on d2", "queen to d2", "pressure on f7", "targeting d6", or "line from d2 to h6" when they fit naturally. Do not invent synonyms if you want the board parser to catch the idea. Do not use XML-style tags like [highlight]g8[/highlight]. No markdown.`,
+    },
+    {
+      role: 'user',
+      content: `Puzzle ${puzzle.rating} | ${themeList}${pastContext}\n\nCurrent position (FEN): ${currentFen}\n\nMove ${moveNumber} of ${totalMoves}. ${sideToMove} to move. The correct move is ${thisUci} (UCI). Narrate it like a host guiding viewers through the tactic.${isLast ? ' After this move, confirm the puzzle is solved.' : ''}${oracleContext ? `\n\nStockfish oracle context:\n${oracleContext}` : ''}`,
+    },
+  ];
+}
+
+export function buildPuzzleOutroPromptWithOracle(
+  puzzle: { fen: string; rating: number; themes: string[] },
+  solvedTurns: Array<{ side: 'w' | 'b'; san: string; commentary: string }>,
+  oracleContext?: string,
+): ChatMessage[] {
+  const themeList = puzzle.themes.slice(0, 4).join(', ');
+  const hostColor = puzzle.fen.split(' ')[1] === 'w' ? 'White' : 'Black';
+  const defendingColor = hostColor === 'White' ? 'Black' : 'White';
+  const lineSummary = solvedTurns.map(t => `${t.side === 'w' ? 'White' : 'Black'}: ${t.san}`).join(', ');
+  return [
+    {
+      role: 'system',
+      content: `${getCommentatorSystemPrompt(true, 'standard')}\n\nYou are closing out a pop-up puzzle break, but you should sound like the same main broadcast commentator. In 2-4 sentences, summarize the key tactical motif, the strategic point of the line, and how ${defendingColor} ran out of resources before segueing back to the live broadcast. If Stockfish oracle context is provided, use it to anchor the verdict, the decisive swing, and the final evaluation. If you mention the engine route, keep it to a short practical branch, not a long move dump. If you annotate, use only this exact syntax: [highlight g8], [circle f7], [arrow d2 h6]. Do not use XML-style tags like [highlight]g8[/highlight]. Do not use [move]. Do not use markdown.`,
+    },
+    {
+      role: 'user',
+      content: `The puzzle is solved. Puzzle ${puzzle.rating} | ${themeList}\n\nSolution line: ${lineSummary || '(none)'}\n\nGive a quick wrap-up for the audience and bridge back to the live game.${oracleContext ? `\n\nStockfish oracle context:\n${oracleContext}` : ''}`,
+    },
+  ];
 }

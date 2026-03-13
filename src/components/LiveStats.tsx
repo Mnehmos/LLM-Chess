@@ -1,4 +1,4 @@
-import { useRef, useEffect, useMemo } from 'react';
+import { useRef, useEffect, useMemo, useState } from 'react';
 import { useGameStore } from '../store/gameStore';
 import type { GameState } from '../engine/types';
 import type { EvalResult } from '../chess/stockfish';
@@ -146,14 +146,42 @@ function MaterialBar({ advantage, whiteName, blackName }: { advantage: number; w
   );
 }
 
+/**
+ * Shows the player model's streaming output while it thinks.
+ * `text` is a raw delta token (one per call) from the LLM stream.
+ * We accumulate here so the store doesn't need changing, and debounce
+ * display updates so the box doesn't repaint on every single token.
+ */
 function StreamingDisplay({ text, model }: { text: string; model: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [accumulated, setAccumulated] = useState('');
+  const [displayed, setDisplayed] = useState('');
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Accumulate deltas; reset when stream ends (text='')
+  useEffect(() => {
+    if (!text) {
+      setAccumulated('');
+      setDisplayed('');
+      if (timerRef.current) clearTimeout(timerRef.current);
+      return;
+    }
+    // Strip 🧠 prefix from reasoning tokens — show content as plain text
+    const delta = text.startsWith('\u{1F9E0}') ? text.slice(2) : text;
+    setAccumulated(prev => prev + delta);
+  }, [text]);
+
+  // Debounce display: update at most ~5×/sec
+  useEffect(() => {
+    if (!accumulated) return;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setDisplayed(accumulated), 200);
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+  }, [accumulated]);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [text]);
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [displayed]);
 
   return (
     <div className="mt-3 pt-3 border-t border-surface-2">
@@ -165,9 +193,10 @@ function StreamingDisplay({ text, model }: { text: string; model: string }) {
       </div>
       <div
         ref={scrollRef}
-        className="max-h-24 overflow-y-auto text-xs font-mono text-text-secondary bg-surface-0 rounded px-2 py-1.5 whitespace-pre-wrap break-all"
+        className="h-24 overflow-y-auto text-xs font-mono text-text-secondary bg-surface-0 rounded px-2 py-1.5 whitespace-pre-wrap break-all"
       >
-        {text}<span className="animate-pulse text-purple-accent">|</span>
+        {displayed || <span className="text-text-muted/40 italic">streaming…</span>}
+        {accumulated && <span className="animate-pulse text-purple-accent">|</span>}
       </div>
     </div>
   );

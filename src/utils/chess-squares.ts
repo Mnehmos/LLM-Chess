@@ -102,6 +102,7 @@ export function sanToSpoken(text: string): string {
 export interface TextSegment {
   text: string;
   isChessMove: boolean;
+  isSquare?: boolean;
   square?: string;
 }
 
@@ -110,8 +111,8 @@ export interface TextSegment {
  * Chess moves are isolated as separate segments for styling.
  */
 export function segmentChessMoves(text: string): TextSegment[] {
-  // Combined pattern: castling or SAN moves
-  const combined = /O-O-O|O-O|\b[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8][+#=]?[QRBN]?\b/g;
+  // Combined pattern: castling, SAN moves, or plain square mentions like "g7"
+  const combined = /O-O-O|O-O|\b[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8][+#=]?[QRBN]?\b|\b[a-h][1-8]\b/g;
   const segments: TextSegment[] = [];
   let lastIndex = 0;
 
@@ -125,10 +126,12 @@ export function segmentChessMoves(text: string): TextSegment[] {
     const moveText = match[0];
     // Extract the square for this specific match
     const squares = extractChessSquares(moveText);
+    const isSquareOnly = /^[a-h][1-8]$/i.test(moveText);
     segments.push({
       text: moveText,
-      isChessMove: true,
-      square: squares[0],
+      isChessMove: !isSquareOnly,
+      isSquare: isSquareOnly,
+      square: isSquareOnly ? moveText.toLowerCase() : squares[0],
     });
 
     lastIndex = start + moveText.length;

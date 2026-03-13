@@ -10,6 +10,7 @@ import { registerNarrationGate, registerNarrationStop } from '../store/tournamen
 interface CommentaryPanelProps {
   entries: CommentaryEntry[];
   commentatorModelName?: string;
+  sessionKey?: string;
   /** Called when narration audio begins playing for an entry — passes its maxMoveIndex for board sync. */
   onNarrationStart?: (maxMoveIndex: number, moves: NarrationMove[]) => void;
   /** Called when sentence starts playing — passes highlighted squares and annotations for board. */
@@ -18,9 +19,24 @@ interface CommentaryPanelProps {
   deadAirRef?: React.MutableRefObject<number>;
   /** Shared ref for audio backlog count — filler system reads it. */
   audioBacklogRef?: React.MutableRefObject<number>;
+  /** Shared ref for actual playback state — filler must not fire while true. */
+  audioPlayingRef?: React.MutableRefObject<boolean>;
+  /** Called when the audio queue fully drains — lets the filler system re-check eligibility. */
+  onAudioDrained?: () => void;
 }
 
-export function CommentaryPanel({ entries, commentatorModelName, onNarrationStart, onNarrationSquares, deadAirRef, audioBacklogRef }: CommentaryPanelProps) {
+const narratedEntryIdsBySession = new Map<string, Set<string>>();
+
+function getNarratedEntryIds(sessionKey: string): Set<string> {
+  let existing = narratedEntryIdsBySession.get(sessionKey);
+  if (!existing) {
+    existing = new Set<string>();
+    narratedEntryIdsBySession.set(sessionKey, existing);
+  }
+  return existing;
+}
+
+export function CommentaryPanel({ entries, commentatorModelName, sessionKey, onNarrationStart, onNarrationSquares, deadAirRef, audioBacklogRef, audioPlayingRef, onAudioDrained }: CommentaryPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const audioQueueRef = useRef<AudioNarrationQueue | null>(null);
   const narratedIdsRef = useRef<Set<string>>(new Set());
@@ -35,6 +51,11 @@ export function CommentaryPanel({ entries, commentatorModelName, onNarrationStar
   const ttsPort = useSettingsStore(s => s.ttsPort);
   const setTtsEnabled = useSettingsStore(s => s.setTtsEnabled);
   const [ttsStatus, setTtsStatus] = useState<TtsStatus | null>(null);
+  const effectiveSessionKey = sessionKey ?? 'default';
+
+  useEffect(() => {
+    narratedIdsRef.current = getNarratedEntryIds(effectiveSessionKey);
+  }, [effectiveSessionKey]);
 
   // Build synth options from current settings
   const synthOptions: TtsSynthesizeOptions = {
@@ -63,14 +84,29 @@ export function CommentaryPanel({ entries, commentatorModelName, onNarrationStar
     };
   }, [ttsVolume]);
 
+  // Wrap in a ref so the effect below never changes deps array size
+  const onAudioDrainedRef = useRef(onAudioDrained);
+  onAudioDrainedRef.current = onAudioDrained;
+
   // Wire sentence-start callback for board highlights
   useEffect(() => {
     if (!audioQueueRef.current) return;
     audioQueueRef.current.setSentenceStartCallback((_text, squares, annotations) => {
       onNarrationSquares?.(squares, annotations);
-      // Clear active entry indicator when narration finishes (empty text = queue idle)
-      if (!_text) setActiveEntryId(null);
+      // Empty text = audio queue fully drained (dead air begins)
+      if (!_text) {
+        setActiveEntryId(null);
+        if (audioPlayingRef) audioPlayingRef.current = false;
+        // Reset backlog ref so filler system doesn't see stale > 0
+        if (audioBacklogRef) audioBacklogRef.current = 0;
+        // Re-trigger filler/puzzle-break scheduling now that audio is silent
+        onAudioDrainedRef.current?.();
+      } else if (audioPlayingRef) {
+        audioPlayingRef.current = true;
+      }
     });
+  // audioBacklogRef and onAudioDrainedRef are stable — intentionally omitted from deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onNarrationSquares]);
 
   // Wire entry-start callback for board advancement (fires when audio actually plays)
@@ -86,11 +122,12 @@ export function CommentaryPanel({ entries, commentatorModelName, onNarrationStar
       }
       // Update shared refs for commentary queue self-tuning
       if (audioQueueRef.current) {
+        if (audioPlayingRef) audioPlayingRef.current = true;
         if (deadAirRef) deadAirRef.current = audioQueueRef.current.avgDeadAirMs;
         if (audioBacklogRef) audioBacklogRef.current = audioQueueRef.current.backlogEntries;
       }
     });
-  }, [onNarrationStart, deadAirRef, audioBacklogRef]);
+  }, [onNarrationStart, deadAirRef, audioBacklogRef, audioPlayingRef]);
 
   // Check TTS health when enabled
   useEffect(() => {
@@ -126,28 +163,49 @@ export function CommentaryPanel({ entries, commentatorModelName, onNarrationStar
         moves: narrationMoves,
         entryId: entry.id,
       });
+      if (audioBacklogRef) audioBacklogRef.current = audioQueueRef.current.backlogEntries;
     }
-  }, [entries, ttsEnabled, ttsProvider, ttsCloudApiKey, ttsCloudVoice, ttsVoice, ttsPort]);
+  }, [entries, effectiveSessionKey, ttsEnabled, ttsProvider, ttsCloudApiKey, ttsCloudVoice, ttsVoice, ttsPort, audioBacklogRef]);
 
   // Stop narration when TTS is disabled
   useEffect(() => {
     if (!ttsEnabled && audioQueueRef.current) {
       audioQueueRef.current.stop();
+      if (audioPlayingRef) audioPlayingRef.current = false;
+      if (audioBacklogRef) audioBacklogRef.current = 0;
     }
-  }, [ttsEnabled]);
+  }, [audioBacklogRef, audioPlayingRef, ttsEnabled]);
+
+  // Keep shared audio refs aligned with the actual queue state even if a callback is missed.
+  useEffect(() => {
+    const sync = () => {
+      if (!audioQueueRef.current) return;
+      if (audioPlayingRef) audioPlayingRef.current = audioQueueRef.current.isActive;
+      if (audioBacklogRef) audioBacklogRef.current = audioQueueRef.current.backlogEntries;
+    };
+    sync();
+    const interval = window.setInterval(sync, 500);
+    return () => window.clearInterval(interval);
+  }, [audioBacklogRef, audioPlayingRef]);
 
   const handleNarrate = useCallback((text: string) => {
     if (!audioQueueRef.current) return;
     audioQueueRef.current.enqueue(text, synthOptions);
-  }, [ttsProvider, ttsCloudApiKey, ttsCloudVoice, ttsVoice, ttsPort]);
+    if (audioBacklogRef) audioBacklogRef.current = audioQueueRef.current.backlogEntries;
+  }, [ttsProvider, ttsCloudApiKey, ttsCloudVoice, ttsVoice, ttsPort, audioBacklogRef]);
 
-  // Auto-scroll: when TTS is off, scroll to bottom on new entries.
-  // When TTS is on, the entry-start callback scrolls to the active entry.
+  // Auto-scroll + highlight: when TTS is off, highlight and scroll to the latest entry.
+  // When TTS is on, the entry-start callback handles this instead.
   useEffect(() => {
-    if (!ttsEnabled && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [entries, ttsEnabled]);
+    if (ttsEnabled || entries.length === 0) return;
+    const latest = entries[entries.length - 1];
+    setActiveEntryId(latest.id);
+    // Small delay so the DOM ref has time to register for new entries
+    setTimeout(() => {
+      const el = entryRefsMap.current.get(latest.id);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 50);
+  }, [entries.length, ttsEnabled]);
 
   if (!commentatorModelName) {
     return (
@@ -229,7 +287,7 @@ export function CommentaryPanel({ entries, commentatorModelName, onNarrationStar
           <p className="text-xs text-text-muted text-center py-4">Waiting for first move...</p>
         )}
         {entries.map((entry) => {
-          const isActive = ttsEnabled && activeEntryId === entry.id;
+          const isActive = activeEntryId === entry.id;
           return (
             <div
               key={entry.id}
@@ -271,6 +329,9 @@ export function CommentaryPanel({ entries, commentatorModelName, onNarrationStar
                   </button>
                 )}
               </div>
+              {entry.streaming && entry.thinking !== undefined && (
+                <ThinkingTokensBox thinking={entry.thinking} />
+              )}
               <div className={`text-xs leading-relaxed pl-3.5 ${isActive ? 'text-text-primary' : 'text-text-secondary'}`}>
                 {entry.text
                   ? <RichCommentaryText text={entry.text} />
@@ -287,7 +348,47 @@ export function CommentaryPanel({ entries, commentatorModelName, onNarrationStar
   );
 }
 
-/** Render commentary text with chess moves highlighted in amber (matching board highlights). */
+/** Fixed-height scrolling box for model reasoning tokens shown during commentary generation.
+ *  Debounces display updates so the box doesn't flash on every single token.
+ */
+function ThinkingTokensBox({ thinking }: { thinking?: string }) {
+  // Debounced display: only update every ~200ms to avoid per-token repaints
+  const [displayed, setDisplayed] = useState('');
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!thinking) return;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      setDisplayed(thinking);
+    }, 200);
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+  }, [thinking]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [displayed]);
+
+  return (
+    <div
+      ref={scrollRef}
+      className="h-[52px] mx-3.5 mb-1 rounded bg-surface-0/60 border border-border/40 px-2 py-1 overflow-y-auto flex-shrink-0"
+    >
+      {displayed ? (
+        <>
+          <span className="text-[9px] text-amber-400/60 mr-1 select-none">🧠</span>
+          <span className="text-[10px] text-text-muted/70 leading-snug whitespace-pre-wrap font-mono">{displayed}</span>
+        </>
+      ) : (
+        <span className="text-[10px] text-text-muted/30 italic font-mono">waiting for reasoning…</span>
+      )}
+    </div>
+  );
+}
+
+/** Render commentary text with move and square mentions highlighted to match board emphasis. */
 function RichCommentaryText({ text }: { text: string }) {
   const segments = segmentChessMoves(text);
 
@@ -296,6 +397,10 @@ function RichCommentaryText({ text }: { text: string }) {
       {segments.map((seg, i) =>
         seg.isChessMove ? (
           <span key={i} className="font-bold text-amber-300">{seg.text}</span>
+        ) : seg.isSquare ? (
+          <span key={i} className="inline-flex items-center rounded px-1 py-0.5 font-mono font-semibold text-amber-200 bg-amber-500/15 border border-amber-500/25">
+            {seg.text}
+          </span>
         ) : (
           <span key={i}>{seg.text}</span>
         ),

@@ -534,6 +534,8 @@ export interface MoveRecord {
   scratchpadState?: string;          // Scratchpad content after this move
   // --- Taxonomy extensions: Eval-Awareness ---
   benchmarkFraming?: BenchmarkFraming;
+  // --- Illegal move attempts (for commentary) ---
+  illegalMovesAttempted?: string[];
   // --- Taxonomy extensions: Attack tracking ---
   attackActive?: boolean;
   activeAttackVectors?: Array<{ channel: string; vectorId: string }>;
@@ -669,7 +671,10 @@ export interface SavedTournament {
   state: GauntletTournamentState;
   abortedGames: Record<string, AbortedGameRecord>;
   commentaryLog: Record<number, string>;
-  evalLog: Record<number, { evalCp: number; isMate: boolean; mateIn: number | null; bestMove: string }>;
+  evalLog: Record<number, EvalLogEntry>;
+  activeGameState?: GameState | null;
+  resumeContext?: ResumeContext | null;
+  activeResumeKey?: string | null;
   savedAt: number;
   name: string;
 }
@@ -685,7 +690,22 @@ export interface AbortedGameRecord {
   openingId: string | null;
   resumeAttempts: number;
   commentaryLog?: Record<number, string>;
-  evalLog?: Record<number, { evalCp: number; isMate: boolean; mateIn: number | null; bestMove: string }>;
+  evalLog?: Record<number, EvalLogEntry>;
+}
+
+export interface EvalLogEntry {
+  evalCp: number;
+  isMate: boolean;
+  mateIn: number | null;
+  bestMove: string;
+  pv: string;
+  depth: number;
+  preMoveEvalCp?: number | null;
+  preMoveIsMate?: boolean;
+  preMoveMateIn?: number | null;
+  preMoveBestMove?: string;
+  preMovePv?: string;
+  preMoveDepth?: number;
 }
 
 export interface ResumeContext {

@@ -20,9 +20,9 @@ export interface EvalResult {
   depth: number;
 }
 
-const INIT_TIMEOUT = 10_000;
-const EVAL_TIMEOUT = 30_000;
-const READY_TIMEOUT = 5_000;
+const DEFAULT_INIT_TIMEOUT = 10_000;
+const DEFAULT_SEARCH_TIMEOUT = 30_000;
+const DEFAULT_READY_TIMEOUT = 5_000;
 const MAX_RESTART_ATTEMPTS = 3;
 
 interface QueuedEval {
@@ -35,6 +35,13 @@ interface QueuedEval {
   reject: (err: Error) => void;
 }
 
+interface StockfishEngineOptions {
+  label?: string;
+  initTimeoutMs?: number;
+  readyTimeoutMs?: number;
+  searchTimeoutMs?: number;
+}
+
 export class StockfishEngine {
   private worker: Worker | null = null;
   private messageHandler: ((line: string) => void) | null = null;
@@ -42,10 +49,21 @@ export class StockfishEngine {
   private initPromise: Promise<void> | null = null;
   private crashed = false;
   private restartCount = 0;
+  private readonly label: string;
+  private readonly initTimeoutMs: number;
+  private readonly readyTimeoutMs: number;
+  private readonly searchTimeoutMs: number;
 
   // Mutex queue — serializes all evaluate() calls
   private queue: QueuedEval[] = [];
   private processing = false;
+
+  constructor(options: StockfishEngineOptions = {}) {
+    this.label = options.label ?? 'default';
+    this.initTimeoutMs = options.initTimeoutMs ?? DEFAULT_INIT_TIMEOUT;
+    this.readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT;
+    this.searchTimeoutMs = options.searchTimeoutMs ?? DEFAULT_SEARCH_TIMEOUT;
+  }
 
   async init(): Promise<void> {
     if (this.ready) return;
@@ -56,15 +74,15 @@ export class StockfishEngine {
     this.initPromise = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.initPromise = null;
-        reject(new Error('Stockfish init timeout'));
-      }, INIT_TIMEOUT);
+        reject(new Error(`Stockfish ${this.label} init timeout`));
+      }, this.initTimeoutMs);
 
       try {
         this.worker = new Worker('/stockfish/stockfish-18-lite-single.js');
       } catch (err) {
         clearTimeout(timeout);
         this.initPromise = null;
-        reject(new Error(`Failed to create Stockfish worker: ${err}`));
+        reject(new Error(`Failed to create Stockfish ${this.label} worker: ${err}`));
         return;
       }
 
@@ -93,8 +111,8 @@ export class StockfishEngine {
         this.initPromise = null;
         this.ready = false;
         this.crashed = true;
-        console.warn('[Stockfish] Worker error — marking as crashed:', err.message);
-        reject(new Error(`Stockfish worker error: ${err.message}`));
+        console.warn(`[Stockfish:${this.label}] Worker error — marking as crashed:`, err.message);
+        reject(new Error(`Stockfish ${this.label} worker error: ${err.message}`));
       };
 
       this.send('uci');
@@ -113,10 +131,10 @@ export class StockfishEngine {
    */
   private async restart(): Promise<void> {
     if (this.restartCount >= MAX_RESTART_ATTEMPTS) {
-      throw new Error(`Stockfish failed after ${MAX_RESTART_ATTEMPTS} restart attempts`);
+      throw new Error(`Stockfish ${this.label} failed after ${MAX_RESTART_ATTEMPTS} restart attempts`);
     }
     this.restartCount++;
-    console.warn(`[Stockfish] Restarting worker (attempt ${this.restartCount}/${MAX_RESTART_ATTEMPTS})`);
+    console.warn(`[Stockfish:${this.label}] Restarting worker (attempt ${this.restartCount}/${MAX_RESTART_ATTEMPTS})`);
 
     // Clean up old worker
     try {
@@ -169,8 +187,8 @@ export class StockfishEngine {
         this.messageHandler = null;
         this.crashed = true;
         this.ready = false;
-        reject(new Error('Stockfish not responding to isready'));
-      }, READY_TIMEOUT);
+        reject(new Error(`Stockfish ${this.label} not responding to isready`));
+      }, this.readyTimeoutMs);
 
       this.messageHandler = (line: string) => {
         if (line.includes('readyok')) {
@@ -211,8 +229,8 @@ export class StockfishEngine {
         // Timeout likely means the worker is dead — mark as crashed for auto-restart
         this.crashed = true;
         this.ready = false;
-        reject(new Error('Stockfish eval timeout'));
-      }, EVAL_TIMEOUT);
+        reject(new Error(`Stockfish ${this.label} search timeout`));
+      }, this.searchTimeoutMs);
 
       let scoreCp = 0;
       let isMate = false;
@@ -343,26 +361,49 @@ export class StockfishEngine {
   }
 }
 
-// Singleton instances — separate workers for gameplay vs display eval
-// This prevents eval timeouts from crashing the player's engine
-let playerInstance: StockfishEngine | null = null;
+// Singleton instances — isolate gameplay, auxiliary analysis, and display eval
+// so long-running advisory/oracle searches cannot starve the actual defender engine.
+let gameplayInstance: StockfishEngine | null = null;
+let analysisInstance: StockfishEngine | null = null;
 let evalInstance: StockfishEngine | null = null;
 
-/** Get Stockfish instance for gameplay (move selection, oracle). */
-export function getStockfish(): StockfishEngine {
-  if (!playerInstance) {
-    playerInstance = new StockfishEngine();
+/** Get Stockfish instance for gameplay move selection. */
+export function getStockfishPlayer(): StockfishEngine {
+  if (!gameplayInstance) {
+    gameplayInstance = new StockfishEngine({
+      label: 'player',
+      searchTimeoutMs: 60_000,
+    });
   }
-  return playerInstance;
+  return gameplayInstance;
+}
+
+/** Get Stockfish instance for oracle/advisor/toolkit analysis. */
+export function getStockfishAnalysis(): StockfishEngine {
+  if (!analysisInstance) {
+    analysisInstance = new StockfishEngine({
+      label: 'analysis',
+      searchTimeoutMs: 45_000,
+    });
+  }
+  return analysisInstance;
 }
 
 /** Get separate Stockfish instance for display/analysis evals.
  *  Failures here never affect the gameplay engine. */
 export function getStockfishEval(): StockfishEngine {
   if (!evalInstance) {
-    evalInstance = new StockfishEngine();
+    evalInstance = new StockfishEngine({
+      label: 'eval',
+      searchTimeoutMs: 30_000,
+    });
   }
   return evalInstance;
+}
+
+/** Backward-compatible alias; prefer explicit player/analysis getters. */
+export function getStockfish(): StockfishEngine {
+  return getStockfishPlayer();
 }
 
 /**

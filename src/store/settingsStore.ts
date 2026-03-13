@@ -38,6 +38,17 @@ interface SettingsState {
   channelWebsite: string;
   channelDonationUrl: string;
   channelCustomPlugLines: string;
+  // Puzzle Break settings
+  puzzleBreakEnabled: boolean;
+  puzzleBreakThresholdMs: number;
+  puzzleBreakModel: string;
+  puzzleBreakReasoningEffort: string;
+  puzzleBreakMaxTokens: number;
+  setPuzzleBreakEnabled: (v: boolean) => void;
+  setPuzzleBreakThresholdMs: (ms: number) => void;
+  setPuzzleBreakModel: (model: string) => void;
+  setPuzzleBreakReasoningEffort: (effort: string) => void;
+  setPuzzleBreakMaxTokens: (tokens: number) => void;
   setFillerEnabled: (enabled: boolean) => void;
   setChannelName: (name: string) => void;
   setChannelWebsite: (url: string) => void;
@@ -92,12 +103,22 @@ export const useSettingsStore = create<SettingsState>()(
       channelWebsite: '',
       channelDonationUrl: '',
       channelCustomPlugLines: '',
+      puzzleBreakEnabled: false,
+      puzzleBreakThresholdMs: 20000,
+      puzzleBreakModel: 'openai/gpt-4o-mini',
+      puzzleBreakReasoningEffort: 'none',
+      puzzleBreakMaxTokens: 500,
 
       setFillerEnabled: (fillerEnabled) => set({ fillerEnabled }),
       setChannelName: (channelName) => set({ channelName }),
       setChannelWebsite: (channelWebsite) => set({ channelWebsite }),
       setChannelDonationUrl: (channelDonationUrl) => set({ channelDonationUrl }),
       setChannelCustomPlugLines: (channelCustomPlugLines) => set({ channelCustomPlugLines }),
+      setPuzzleBreakEnabled: (puzzleBreakEnabled) => set({ puzzleBreakEnabled }),
+      setPuzzleBreakThresholdMs: (puzzleBreakThresholdMs) => set({ puzzleBreakThresholdMs }),
+      setPuzzleBreakModel: (puzzleBreakModel) => set({ puzzleBreakModel }),
+      setPuzzleBreakReasoningEffort: (puzzleBreakReasoningEffort) => set({ puzzleBreakReasoningEffort }),
+      setPuzzleBreakMaxTokens: (puzzleBreakMaxTokens) => set({ puzzleBreakMaxTokens }),
 
       setProvider: (provider) => {
         const keys = get().providerKeys;
@@ -152,7 +173,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'llm-chess-settings',
-      version: 7,
+      version: 8,
       migrate: (persisted, version) => {
         const state = (persisted || {}) as Partial<SettingsState> & {
           provider?: LLMProvider | string;
@@ -185,6 +206,11 @@ export const useSettingsStore = create<SettingsState>()(
             channelWebsite: s.channelWebsite ?? '',
             channelDonationUrl: s.channelDonationUrl ?? '',
             channelCustomPlugLines: s.channelCustomPlugLines ?? '',
+            puzzleBreakEnabled: s.puzzleBreakEnabled ?? false,
+            puzzleBreakThresholdMs: s.puzzleBreakThresholdMs ?? 20000,
+            puzzleBreakModel: s.puzzleBreakModel ?? 'openai/gpt-4o-mini',
+            puzzleBreakReasoningEffort: s.puzzleBreakReasoningEffort ?? 'none',
+            puzzleBreakMaxTokens: s.puzzleBreakMaxTokens ?? 500,
           } as SettingsState;
         }
 
@@ -229,6 +255,9 @@ export const useSettingsStore = create<SettingsState>()(
           channelWebsite: '',
           channelDonationUrl: '',
           channelCustomPlugLines: '',
+          puzzleBreakEnabled: false,
+          puzzleBreakThresholdMs: 20000,
+          puzzleBreakModel: 'openai/gpt-4o-mini',
         } as SettingsState;
       },
     },
