@@ -473,6 +473,7 @@ export interface MoveRecord {
   color: PieceColor;
   move: string;
   reasoning?: string;
+  reasoningTrace?: string;
   commentary?: string;
   thinkingTimeMs: number;
   attempts: number;

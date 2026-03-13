@@ -76,6 +76,7 @@ export interface MoveAppliedEvent extends BaseEvent {
     to: string;
     fen: string;
     reasoning?: string;
+    reasoningTrace?: string;
     thinkingTimeMs: number;
     attemptNumber: number;
     isCheck: boolean;

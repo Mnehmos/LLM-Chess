@@ -221,6 +221,7 @@ export class OpenAIClient {
 
     return {
       content: extractTextContent(choice.message?.content),
+      reasoningTrace: typeof choice.message?.reasoning === 'string' ? choice.message.reasoning : undefined,
       model: data.model || model,
       responseTimeMs: Date.now() - startTime,
       tokensUsed: data.usage?.total_tokens,

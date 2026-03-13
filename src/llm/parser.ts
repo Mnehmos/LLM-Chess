@@ -23,6 +23,7 @@ export const ChessMoveSchema = z.object({
 
 export interface LLMRawResponse {
   content: string;
+  reasoningTrace?: string;
   model: string;
   responseTimeMs: number;
   tokensUsed?: number;

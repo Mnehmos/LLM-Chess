@@ -72,6 +72,7 @@ function exportMoveRecord(m: MoveRecord): Record<string, unknown> {
     color: m.color,
     move: m.move,
     reasoning: m.reasoning || null,
+    reasoningTrace: m.reasoningTrace || null,
     commentary: m.commentary || null,
     thinkingTimeMs: m.thinkingTimeMs,
     attempts: m.attempts,

@@ -63,6 +63,7 @@ export function gameReducer(state: GameState, event: GameEvent): GameState {
             color: event.payload.color,
             move: event.payload.san,
             reasoning: event.payload.reasoning,
+            reasoningTrace: event.payload.reasoningTrace,
             thinkingTimeMs: event.payload.thinkingTimeMs,
             attempts: event.payload.attemptNumber,
             oracleAttempts: event.payload.oracleAttempts,

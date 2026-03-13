@@ -675,6 +675,7 @@ export class GameRuntime {
             to: moveResult.to,
             fen: newFen,
             reasoning: parsed.reasoning,
+            reasoningTrace: decision.reasoningTrace,
             thinkingTimeMs: decision.responseTimeMs,
             attemptNumber: moveAttempt,
             isCheck: this.chess.isCheck(),
@@ -777,6 +778,7 @@ export class GameRuntime {
   ): Promise<{
     parsed: ReturnType<typeof parseMoveResponse> | null;
     rawContent: string;
+    reasoningTrace?: string;
     responseTimeMs: number;
     promptTokens?: number;
     completionTokens?: number;
@@ -837,6 +839,7 @@ export class GameRuntime {
         return {
           parsed,
           rawContent: forcedMove ?? '',
+          reasoningTrace: undefined,
           responseTimeMs: wallClockLimit ?? 0,
           moveSource: requestResult.moveSource,
           constraintViolation: requestResult.violation,
@@ -870,6 +873,7 @@ export class GameRuntime {
             })
           : null),
         rawContent,
+        reasoningTrace: undefined,
         responseTimeMs: advisorResult.responseTimeMs,
         totalTokens: advisorResult.tokensUsed,
         moveSource: advisorResult.correctionLoopMode === 'forced' ? 'advisor_forced' : 'llm',
@@ -915,6 +919,7 @@ export class GameRuntime {
       return {
         parsed,
         rawContent: forcedMove ?? '',
+        reasoningTrace: undefined,
         responseTimeMs: wallClockLimit ?? 0,
         moveSource: requestResult.moveSource,
         constraintViolation: requestResult.violation,
@@ -939,6 +944,7 @@ export class GameRuntime {
     return {
       parsed,
       rawContent: rawResponse.content,
+      reasoningTrace: rawResponse.reasoningTrace,
       responseTimeMs: rawResponse.responseTimeMs,
       promptTokens: rawResponse.promptTokens,
       completionTokens: rawResponse.completionTokens,

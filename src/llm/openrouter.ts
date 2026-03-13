@@ -240,6 +240,7 @@ export class OpenRouterClient {
 
     return {
       content: choice.message?.content || '',
+      reasoningTrace: typeof choice.message?.reasoning === 'string' ? choice.message.reasoning : undefined,
       model: data.model || model,
       responseTimeMs: Date.now() - startTime,
       tokensUsed: data.usage?.total_tokens,
@@ -262,6 +263,7 @@ export class OpenRouterClient {
     const reasoningLoopGuard = new StreamLoopGuard();
     const contentLoopGuard = new StreamLoopGuard();
     let accumulated = '';
+    let accumulatedReasoning = '';
     let buffer = '';
     let finishReason = 'stop';
     let tokensUsed: number | undefined;
@@ -300,6 +302,7 @@ export class OpenRouterClient {
               await reader.cancel('loop_abort').catch(() => undefined);
               break;
             }
+            accumulatedReasoning += deltaReasoning;
             onToken('\u{1F9E0}' + deltaReasoning); // prefix 🧠 so callers can distinguish
           }
           if (deltaContent) {
@@ -337,6 +340,7 @@ export class OpenRouterClient {
 
     return {
       content: accumulated,
+      reasoningTrace: accumulatedReasoning || undefined,
       model,
       responseTimeMs: Date.now() - startTime,
       tokensUsed,
