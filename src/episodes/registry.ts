@@ -1,16 +1,17 @@
+import { OPERA_GAME_EPISODE } from './opera_game_morphy_1858';
 import type { Episode, EpisodeSource } from './types';
 
 /**
  * All registered Chess Episodes in display order.
  *
  * Adding an episode: build its directory under `src/episodes/<id>/` and
- * append the exported `*_EPISODE` constant here. PR 1 ships the substrate
- * with an empty list; the first historic episode (Opera Game) lands in
- * PR 2.
+ * append the exported `*_EPISODE` constant here.
  */
-export const CHESS_EPISODES: Episode[] = [];
+export const CHESS_EPISODES: Episode[] = [
+  OPERA_GAME_EPISODE,
+];
 
-/** Default episode id when no `?episode=` is specified. Empty until PR 2. */
+/** Default episode id when no `?episode=` is specified. */
 export const DEFAULT_EPISODE_ID: string | undefined = CHESS_EPISODES[0]?.id;
 
 /** Default episode id used by export scripts when no `--episode=` flag is passed. */
