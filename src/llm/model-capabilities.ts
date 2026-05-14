@@ -329,10 +329,11 @@ export function shouldStream(modelId: string): boolean {
  * We cap their reasoning effort to keep response times reasonable for chess.
  */
 const REASONING_MODEL_PATTERNS = [
-  /\bgpt-5\b/i,          // GPT-5.x family (5.2, 5.3, 5.4)
+  /\bgpt-5\b/i,          // GPT-5.x family (5.2, 5.3, 5.4, 5.5)
+  /\bchatgpt-5\b/i,      // ChatGPT 5.x family (5.5)
   /\bo[134]-/i,          // o1-, o3-, o4-
   /\bclaude-3\.7\b/i,    // Claude Sonnet 3.7 reasoning
-  /\bclaude-(?:sonnet|opus)-4(?:\.\d+)?\b/i, // Claude 4 / 4.1 / 4.5 families
+  /\bclaude-(?:sonnet|opus)-4(?:\.\d+)?\b/i, // Claude 4 / 4.1 / 4.5 / 4.6 / 4.7 families
   /\bclaude-4(?:\.\d+)?\b/i, // Claude 4 family fallback
   /\bdeepseek.*r1\b/i,   // DeepSeek R1/R2
   /\bdeepseek.*v3\.2\b/i, // DeepSeek V3.2 (integrated thinking)
@@ -394,6 +395,7 @@ export function getAdaptiveMoveTokenBudget(
 
   const isLargeOutputModel =
     /\bgpt-5(\.|-|$)/i.test(modelId)
+    || /\bchatgpt-5/i.test(modelId)
     || /\bcodex\b/i.test(modelId)
     || /\bclaude-3\.7\b/i.test(modelId)
     || /\bclaude-(?:sonnet|opus)-4(?:\.\d+)?\b/i.test(modelId)
