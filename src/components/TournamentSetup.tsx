@@ -60,6 +60,7 @@ interface CommentatorSlot {
 
 const TOP_MODELS: Record<LLMProvider, { model: string; name: string }[]> = {
   openrouter: [
+    { model: 'openai/gpt-5.5', name: 'GPT-5.5' },
     { model: 'openai/gpt-5.4', name: 'GPT-5.4' },
     { model: 'openai/gpt-5.3-codex', name: 'GPT-5.3 Codex' },
     { model: 'google/gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview' },
