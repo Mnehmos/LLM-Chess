@@ -15,3 +15,4 @@ export {
   getEpisode,
   listEpisodesBySource,
 } from './registry';
+export { OPERA_GAME_EPISODE } from './opera_game_morphy_1858';
