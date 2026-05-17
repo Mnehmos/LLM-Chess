@@ -4,6 +4,7 @@ import type { ChatMessage } from './prompts';
 import type { LLMRawResponse } from './parser';
 import { buildChessPrompt, buildRetryPrompt, buildRetryPromptForReason, buildCommentaryPrompt, type CommentaryContext, type RetryReason } from './prompts';
 import { buildResponseFormat, shouldStream, buildReasoningParams, getAdaptiveMoveTokenBudget } from './model-capabilities';
+import { extractMessageContent } from './content';
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
 
@@ -112,7 +113,7 @@ export class OllamaClient {
     if (!choice) throw new Error('No choices in Ollama response');
 
     return {
-      content: choice.message?.content || '',
+      content: extractMessageContent(choice.message?.content),
       model: data.model || model,
       responseTimeMs: Date.now() - startTime,
       tokensUsed: data.usage?.total_tokens,
@@ -156,7 +157,7 @@ export class OllamaClient {
 
         try {
           const parsed = JSON.parse(data);
-          const delta = parsed.choices?.[0]?.delta?.content;
+          const delta = extractMessageContent(parsed.choices?.[0]?.delta?.content);
           if (delta) {
             if (ttftMs === undefined) ttftMs = Date.now() - startTime;
             lastTokenMs = Date.now();
@@ -218,7 +219,7 @@ export class OllamaClient {
 
       if (!response.ok) return '';
       const data = await response.json();
-      return data.choices?.[0]?.message?.content || '';
+      return extractMessageContent(data.choices?.[0]?.message?.content);
     } catch {
       return '';
     }
