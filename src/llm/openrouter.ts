@@ -6,6 +6,7 @@ import { buildChessPrompt, buildRetryPrompt, buildRetryPromptForReason, buildCom
 import { buildResponseFormat, shouldStream, downgradeModel, buildReasoningParams, getAdaptiveMoveTokenBudget } from './model-capabilities';
 import { PermanentAPIError, RateLimitError } from './errors';
 import { StreamLoopGuard } from './stream-loop-guard';
+import { extractMessageContent } from './content';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 const MODEL_RATE_LIMIT_UNTIL = new Map<string, number>();
@@ -239,7 +240,7 @@ export class OpenRouterClient {
     if (!choice) throw new Error('No choices in OpenRouter response');
 
     return {
-      content: choice.message?.content || '',
+      content: extractMessageContent(choice.message?.content),
       model: data.model || model,
       responseTimeMs: Date.now() - startTime,
       tokensUsed: data.usage?.total_tokens,
@@ -288,7 +289,7 @@ export class OpenRouterClient {
         try {
           const parsed = JSON.parse(data);
           const choice = parsed.choices?.[0];
-          const deltaContent = choice?.delta?.content;
+          const deltaContent = extractMessageContent(choice?.delta?.content);
           const deltaReasoning = choice?.delta?.reasoning;
           if (deltaReasoning) {
             // Thinking tokens — pass as-is so callers can show reasoning if desired
@@ -379,7 +380,7 @@ export class OpenRouterClient {
 
     if (!response.ok) return '';
     const data = await response.json();
-    return data.choices?.[0]?.message?.content || '';
+    return extractMessageContent(data.choices?.[0]?.message?.content);
   }
 
   async requestCommentaryStream(
@@ -436,7 +437,7 @@ export class OpenRouterClient {
       });
       if (retryResp.ok) {
         const retryData = await retryResp.json();
-        const retryContent = retryData.choices?.[0]?.message?.content;
+        const retryContent = extractMessageContent(retryData.choices?.[0]?.message?.content);
         if (retryContent) {
           onChunk(retryContent);
           return retryContent;

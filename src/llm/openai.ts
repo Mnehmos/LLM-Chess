@@ -6,6 +6,7 @@ import { buildReasoningParams, buildResponseFormat, downgradeModel, getAdaptiveM
 import { PermanentAPIError, RateLimitError } from './errors';
 import type { LLMModel, MoveResponseOptions } from './client';
 import { StreamLoopGuard } from './stream-loop-guard';
+import { extractMessageContent } from './content';
 
 const OPENAI_BASE = 'https://api.openai.com/v1';
 
@@ -220,7 +221,7 @@ export class OpenAIClient {
     if (!choice) throw new Error('No choices in OpenAI response');
 
     return {
-      content: extractTextContent(choice.message?.content),
+      content: extractMessageContent(choice.message?.content),
       model: data.model || model,
       responseTimeMs: Date.now() - startTime,
       tokensUsed: data.usage?.total_tokens,
@@ -268,7 +269,7 @@ export class OpenAIClient {
         try {
           const parsed = JSON.parse(data);
           const deltaRaw = parsed.choices?.[0]?.delta?.content;
-          const delta = extractTextContent(deltaRaw);
+          const delta = extractMessageContent(deltaRaw);
           if (delta) {
             if (ttftMs === undefined) ttftMs = Date.now() - startTime;
             lastTokenMs = Date.now();
@@ -351,7 +352,7 @@ export class OpenAIClient {
       return '';
     }
     const data = await response.json();
-    return extractTextContent(data.choices?.[0]?.message?.content);
+    return extractMessageContent(data.choices?.[0]?.message?.content);
   }
 
   async requestCommentaryStream(
@@ -431,23 +432,6 @@ export class OpenAIClient {
       return false;
     }
   }
-}
-
-function extractTextContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part;
-        if (!part || typeof part !== 'object') return '';
-        if ('text' in part && typeof (part as { text?: unknown }).text === 'string') {
-          return (part as { text: string }).text;
-        }
-        return '';
-      })
-      .join('');
-  }
-  return '';
 }
 
 function mapReasoningEffort(rawEffort: string): 'minimal' | 'low' | 'medium' | 'high' | undefined {
