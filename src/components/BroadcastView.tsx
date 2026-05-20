@@ -5,6 +5,8 @@ import { getBroadcastConfig } from '../app/broadcastConfig';
 import { exportBridge } from '../app/exportBridge';
 import { getEpisode, DEFAULT_EPISODE_ID } from '../episodes';
 import { TournamentProgress } from './TournamentProgress';
+import { getActiveAudioNarrationQueue } from '../tts/audio-queue';
+import { createRenderPlanFromPgn, type RenderPlan } from '../production/renderPlan';
 
 /**
  * BroadcastView — the chrome-free, auto-playing layout used by the
@@ -64,6 +66,10 @@ export function BroadcastView() {
   }, [episodeCommentatorModel, setReplayCommentatorModel]);
 
   // Register bridge hooks so the capture pipeline can drive start/reset.
+  // On start(), build a render plan from the PGN, attach it to the
+  // bridge for diagnostics, mark the active audio queue's playback
+  // start time, and wire the segment-start callback so each commentary
+  // entry's first sentence records a paint offset.
   useEffect(() => {
     exportBridge.__register({
       start: () => {
@@ -76,6 +82,29 @@ export function BroadcastView() {
           return;
         }
         startedRef.current = true;
+
+        const config = getBroadcastConfig();
+        const plan: RenderPlan = createRenderPlanFromPgn({
+          id: config.episodeId ?? 'inline-pgn',
+          runId: `run:${Date.now()}`,
+          title: 'Broadcast capture',
+          pgn: pgnText,
+          episodeId: config.episodeId ?? undefined,
+        });
+        exportBridge.__setRenderPlan(plan);
+
+        const audioQueue = getActiveAudioNarrationQueue();
+        if (audioQueue) {
+          audioQueue.markPlaybackStart(performance.now());
+          audioQueue.setSegmentStartCallback((moveIndex, offsetMs) => {
+            exportBridge.__recordSegmentTiming(moveIndex, offsetMs);
+          });
+        } else {
+          console.warn(
+            '[BroadcastView] No active AudioNarrationQueue at start() — segment timings will not be recorded',
+          );
+        }
+
         startReplay(pgnText, {
           historicalContext,
           moveDelayMs: 0,
@@ -84,6 +113,14 @@ export function BroadcastView() {
       },
       reset: () => {
         startedRef.current = false;
+        const audioQueue = getActiveAudioNarrationQueue();
+        if (audioQueue) {
+          // Disable segment-timing emission; markPlaybackStart(0)
+          // sets the gate field to 0 which the queue treats as "not
+          // in broadcast mode."
+          audioQueue.markPlaybackStart(0);
+          audioQueue.setSegmentStartCallback(null);
+        }
         if (replayMode) stopReplay();
       },
     });
