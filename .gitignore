@@ -35,3 +35,9 @@ src-tauri/target/
 # Local Lichess puzzle database artifacts
 data/raw/
 public/data/lichess-puzzles-1500-plus.json
+
+# Generated MP4-export artifacts
+exports/
+
+# TTS clip cache (content-hashed)
+.tts-cache/

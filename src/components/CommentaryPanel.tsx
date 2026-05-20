@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CommentaryEntry } from '../commentary/commentaryQueue';
-import { AudioNarrationQueue, type NarrationMove } from '../tts/audio-queue';
+import { AudioNarrationQueue, registerAudioNarrationQueue, type NarrationMove } from '../tts/audio-queue';
 import { checkTtsHealth, checkCloudTtsHealth, type TtsStatus, type TtsSynthesizeOptions } from '../tts/tts-client';
 import { useSettingsStore } from '../store/settingsStore';
 import { segmentChessMoves } from '../utils/chess-squares';
@@ -76,11 +76,17 @@ export function CommentaryPanel({ entries, commentatorModelName, sessionKey, onN
     registerNarrationGate(() => audioQueueRef.current?.waitUntilDone() ?? Promise.resolve());
     // Register stop callback so aborting/skipping kills audio immediately
     registerNarrationStop(() => audioQueueRef.current?.stop());
+    // Expose this queue to the MP4-export broadcast path so it can
+    // call markPlaybackStart() and setSegmentStartCallback() on the
+    // active instance without reaching into React internals. No-op
+    // outside broadcast mode.
+    registerAudioNarrationQueue(audioQueueRef.current);
     return () => {
       // Stop any playing audio when component unmounts or effect re-runs
       audioQueueRef.current?.stop();
       registerNarrationGate(null);
       registerNarrationStop(null);
+      registerAudioNarrationQueue(null);
     };
   }, [ttsVolume]);
 
