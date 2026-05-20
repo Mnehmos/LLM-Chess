@@ -802,6 +802,7 @@ export class GameRuntime {
     declaredCompromised?: string;
   }> {
     let streamed = '';
+    const requestStartedAt = Date.now();
     const onToken = this.streamListener
       ? (text: string) => {
           streamed = text;
@@ -893,6 +894,16 @@ export class GameRuntime {
       };
     }
 
+    console.log(
+      '[LLM] Requesting move: model=%s color=%s turn=%d legalMoves=%d effort=%s maxTokens=%s retry=%s',
+      player.model,
+      color,
+      context.turnNumber,
+      context.legalMoves.length,
+      player.reasoningEffort ?? 'default',
+      player.maxTokens ?? 'default',
+      previousIllegalMove ? JSON.stringify(previousIllegalMove) : 'none',
+    );
     const rawRequest = this.llm.requestMove(player, context, previousIllegalMove, onToken);
     const requestResult = wallClockLimit
       ? await ConstraintEnforcer.enforceWallClock(
@@ -916,6 +927,15 @@ export class GameRuntime {
       if (this.streamListener) {
         this.streamListener('', player.model);
       }
+      console.warn(
+        '[LLM] Move request timed out: model=%s color=%s turn=%d elapsedMs=%d moveSource=%s violation=%s',
+        player.model,
+        color,
+        context.turnNumber,
+        Date.now() - requestStartedAt,
+        requestResult.moveSource,
+        requestResult.violation ?? 'none',
+      );
       return {
         parsed,
         rawContent: forcedMove ?? '',
@@ -927,6 +947,17 @@ export class GameRuntime {
     }
 
     const rawResponse = requestResult.result;
+    console.log(
+      '[LLM] Move response received: model=%s color=%s turn=%d elapsedMs=%d finishReason=%s promptTokens=%s completionTokens=%s reasoningTokens=%s',
+      player.model,
+      color,
+      context.turnNumber,
+      Date.now() - requestStartedAt,
+      rawResponse.finishReason ?? 'unknown',
+      rawResponse.promptTokens ?? 'n/a',
+      rawResponse.completionTokens ?? 'n/a',
+      rawResponse.reasoningTokens ?? 'n/a',
+    );
     const parsed = parseMoveResponse(rawResponse);
     const toolInvocations = parseToolInvocations(rawResponse.content, context.turnNumber);
     const notes = rawResponse.content && this.scratchpads[color]

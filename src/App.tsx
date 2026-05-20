@@ -39,7 +39,8 @@ export function App() {
     void initializeBenchmark();
   }, [initializeBenchmark]);
 
-  // Auto-start TTS sidecar when running in Tauri and TTS is enabled
+  // Auto-start TTS sidecar when running in Tauri and TTS is enabled.
+  // Include the full TTS config so model/port/python changes restart cleanly.
   const ttsEnabled = useSettingsStore(s => s.ttsEnabled);
   const ttsModel = useSettingsStore(s => s.ttsModel);
   const ttsPythonPath = useSettingsStore(s => s.ttsPythonPath);
@@ -59,9 +60,7 @@ export function App() {
       // Stop sidecar when TTS is disabled (Tauri only)
       void stopTtsServer().catch(() => {});
     }
-  // Only run when TTS is toggled
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ttsEnabled]);
+  }, [ttsEnabled, ttsModel, ttsPythonPath, ttsPort]);
 
   // Record game when it ends
   const gameStatus = gameState?.status;

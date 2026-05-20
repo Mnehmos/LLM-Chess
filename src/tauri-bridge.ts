@@ -11,8 +11,25 @@ interface TtsStatus {
   error: string | null;
 }
 
+interface TtsStartOptions {
+  pythonPath?: string;
+  model?: string;
+  port?: number;
+}
+
 /** True when running inside a Tauri webview (desktop app). */
 export const isTauri: boolean = '__TAURI_INTERNALS__' in window;
+
+let ttsStartInFlight: Promise<TtsStatus> | null = null;
+let ttsStartInFlightKey: string | null = null;
+
+function getTtsStartKey(options?: TtsStartOptions): string {
+  return JSON.stringify({
+    pythonPath: options?.pythonPath ?? null,
+    model: options?.model ?? null,
+    port: options?.port ?? null,
+  });
+}
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri) throw new Error('Not running in Tauri');
@@ -35,20 +52,31 @@ export async function loadPuzzleCatalog(): Promise<string | null> {
  * Start the TTS Python sidecar via Tauri.
  * Falls back to assuming the server is already running externally in browser mode.
  */
-export async function startTtsServer(options?: {
-  pythonPath?: string;
-  model?: string;
-  port?: number;
-}): Promise<TtsStatus> {
+export async function startTtsServer(options?: TtsStartOptions): Promise<TtsStatus> {
   if (!isTauri) {
     // In browser mode, just check if the server is already running externally
     return checkTtsServer(options?.port);
   }
-  return invoke<TtsStatus>('start_tts_server', {
-    pythonPath: options?.pythonPath ?? null,
-    model: options?.model ?? null,
-    port: options?.port ?? null,
-  });
+  const startKey = getTtsStartKey(options);
+  if (ttsStartInFlight && ttsStartInFlightKey === startKey) {
+    return ttsStartInFlight;
+  }
+  ttsStartInFlightKey = startKey;
+  ttsStartInFlight = (async () => {
+    try {
+      return await invoke<TtsStatus>('start_tts_server', {
+        pythonPath: options?.pythonPath ?? null,
+        model: options?.model ?? null,
+        port: options?.port ?? null,
+      });
+    } finally {
+      if (ttsStartInFlightKey === startKey) {
+        ttsStartInFlight = null;
+        ttsStartInFlightKey = null;
+      }
+    }
+  })();
+  return ttsStartInFlight;
 }
 
 /**
@@ -58,6 +86,8 @@ export async function stopTtsServer(): Promise<TtsStatus> {
   if (!isTauri) {
     return { running: false, port: 9877, model: null, error: null };
   }
+  ttsStartInFlight = null;
+  ttsStartInFlightKey = null;
   return invoke<TtsStatus>('stop_tts_server');
 }
 

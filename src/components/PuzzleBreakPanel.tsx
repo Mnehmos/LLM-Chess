@@ -377,7 +377,6 @@ export function PuzzleBreakPanel({
     if (!audioQueueRef.current) {
       audioQueueRef.current = new AudioNarrationQueue();
     }
-    audioQueueRef.current.setVolume(ttsVolume);
     audioQueueRef.current.setSentenceStartCallback((text, squares, annotations) => {
       if (!text) {
         const finishedEntryId = activeNarrationEntryRef.current;
@@ -407,8 +406,13 @@ export function PuzzleBreakPanel({
       }
     });
     return () => {
-      audioQueueRef.current?.stop();
+      audioQueueRef.current?.dispose();
+      audioQueueRef.current = null;
     };
+  }, []);
+
+  useEffect(() => {
+    audioQueueRef.current?.setVolume(ttsVolume);
   }, [ttsVolume]);
 
   useEffect(() => {

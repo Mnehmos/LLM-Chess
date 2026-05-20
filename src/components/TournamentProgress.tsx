@@ -37,6 +37,26 @@ interface PausedPuzzleSession {
 
 const introGeneratedForGameIds = new Set<string>();
 const queuedMoveCountByGameId = new Map<string, number>();
+const MAX_TRACKED_GAME_IDS = 128;
+
+function rememberIntroGenerated(gameId: string): void {
+  introGeneratedForGameIds.add(gameId);
+  while (introGeneratedForGameIds.size > MAX_TRACKED_GAME_IDS) {
+    const oldest = introGeneratedForGameIds.values().next().value;
+    if (!oldest) break;
+    introGeneratedForGameIds.delete(oldest);
+  }
+}
+
+function rememberQueuedMoveCount(gameId: string, moveCount: number): void {
+  queuedMoveCountByGameId.delete(gameId);
+  queuedMoveCountByGameId.set(gameId, moveCount);
+  while (queuedMoveCountByGameId.size > MAX_TRACKED_GAME_IDS) {
+    const oldest = queuedMoveCountByGameId.keys().next().value;
+    if (!oldest) break;
+    queuedMoveCountByGameId.delete(oldest);
+  }
+}
 
 function getSavedCommentaryMoveCount(commentaryLog: Record<number, string>): number {
   const moveIndexes = Object.keys(commentaryLog)
@@ -426,7 +446,7 @@ export function TournamentProgress() {
         !introGeneratedForGameIds.has(activeGameState.gameId)
       ) {
         preGameNarrationActiveRef.current = true;
-        introGeneratedForGameIds.add(activeGameState.gameId);
+        rememberIntroGenerated(activeGameState.gameId);
         const white = activeGameState.white.displayName || activeGameState.white.model;
         const black = activeGameState.black.displayName || activeGameState.black.model;
         const priorPly = useTournamentStore.getState().replayPriorMoveCount;
@@ -573,7 +593,7 @@ export function TournamentProgress() {
       });
     }
     lastQueuedMoveCountRef.current = moveCount;
-    queuedMoveCountByGameId.set(activeGameState.gameId, moveCount);
+    rememberQueuedMoveCount(activeGameState.gameId, moveCount);
     // Reset thinking timer whenever a new move arrives
     lastMoveAtRef.current = Date.now();
     setThinkingElapsedMs(0);
@@ -930,6 +950,49 @@ export function TournamentProgress() {
     return `${winner} kept the initiative from the first critical move onward and converted the tactic cleanly once the defensive resources were exhausted.${evalText}${pvText}`;
   }
 
+  function buildCanonicalPuzzleTurns(puzzle: LichessPuzzle, existingTurns: PuzzleTurn[]): PuzzleTurn[] {
+    const turns: PuzzleTurn[] = [...existingTurns];
+    let currentFen = turns[turns.length - 1]?.fenAfter ?? puzzle.fen;
+    const hostSide = puzzle.fen.split(' ')[1] === 'b' ? 'b' : 'w';
+
+    for (let solutionIdx = turns.length; solutionIdx < puzzle.solution.length; solutionIdx++) {
+      const solutionUci = puzzle.solution[solutionIdx];
+      const side = puzzleSideToMove(currentFen);
+      const moveResult = applyPuzzleMove(currentFen, solutionUci);
+      if (!moveResult) {
+        console.error(`[PuzzleBreak] Canonical solution UCI "${solutionUci}" invalid for puzzle ${puzzle.id}`);
+        break;
+      }
+
+      const rawCommentary = buildPuzzleTurnFallback(
+        side,
+        moveResult.san,
+        moveResult.uci,
+        solutionIdx === puzzle.solution.length - 1,
+        hostSide,
+      );
+      const { clean: commentary, annotations } = parseAnnotations(rawCommentary, { fen: currentFen, sideToMove: side });
+      const defaultAnnotations = buildPuzzleMoveAnnotations(moveResult.uci, side);
+      const finalAnnotations = hasAnnotations(annotations)
+        ? mergeAnnotations(defaultAnnotations, annotations)
+        : defaultAnnotations;
+
+      turns.push({
+        side,
+        uci: moveResult.uci,
+        san: moveResult.san,
+        fenBefore: currentFen,
+        fenAfter: moveResult.fen,
+        commentary,
+        rawCommentary,
+        annotations: finalAnnotations,
+      });
+      currentFen = moveResult.fen;
+    }
+
+    return turns;
+  }
+
   function getPuzzleStageMaxTokens(modelMaxTokens?: number): number {
     const providerBudget = modelMaxTokens ?? 3_200;
     return Math.max(900, Math.min(providerBudget, 3_200));
@@ -1088,9 +1151,10 @@ export function TournamentProgress() {
         setPuzzleThinkingText('');
       } catch (err) {
         if (abortCtrl.signal.aborted) return;
-        console.error('[PuzzleBreak] Setup error:', err);
-        setPuzzleError(err instanceof Error ? err.message : String(err));
-        puzzleSetupRequestStartedRef.current = false;
+        console.warn('[PuzzleBreak] Setup error — using fallback setup:', err);
+        setPuzzleSetupText(buildPuzzleSetupFallback(currentPuzzle));
+        setPuzzleStreamText('');
+        setPuzzleThinkingText('');
       }
     })();
   }, [apiKey, commentatorModel?.id, currentPuzzle, ollamaBaseUrl, provider, puzzleIntroText, puzzleSetupText]);
@@ -1105,12 +1169,12 @@ export function TournamentProgress() {
     puzzleTurnLoopStartedRef.current = true;
 
     void (async () => {
+      let turns: PuzzleTurn[] = [...puzzleTurnHistory];
       try {
         if (!commentatorModel?.id) throw new Error('No commentator model selected');
 
         const client = createLLMClient({ provider, apiKey, ollamaBaseUrl });
         let currentFen = puzzleTurnHistory[puzzleTurnHistory.length - 1]?.fenAfter ?? currentPuzzle.fen;
-        const turns: PuzzleTurn[] = [...puzzleTurnHistory];
 
         for (let solutionIdx = turns.length; solutionIdx < currentPuzzle.solution.length; solutionIdx++) {
           if (abortCtrl.signal.aborted) return;
@@ -1213,9 +1277,13 @@ export function TournamentProgress() {
         setPuzzleIsComplete(true);
       } catch (err) {
         if (abortCtrl.signal.aborted) return;
-        console.error('[PuzzleBreak] Turn loop error:', err);
-        setPuzzleError(err instanceof Error ? err.message : String(err));
-        puzzleTurnLoopStartedRef.current = false;
+        console.warn('[PuzzleBreak] Turn loop error — finishing with canonical fallback line:', err);
+        turns = buildCanonicalPuzzleTurns(currentPuzzle, turns);
+        setPuzzleTurnHistory([...turns]);
+        setPuzzleStreamingSide(null);
+        setPuzzleStreamText('');
+        setPuzzleThinkingText('');
+        setPuzzleIsComplete(true);
       }
     })();
   }, [apiKey, commentatorModel?.id, commentatorModel?.maxTokens, currentPuzzle, ollamaBaseUrl, provider, puzzleCommentaryReasoningEffort, puzzleSetupText]);
@@ -1265,9 +1333,13 @@ export function TournamentProgress() {
         setPuzzleThinkingText('');
       } catch (err) {
         if (abortCtrl.signal.aborted) return;
-        console.error('[PuzzleBreak] Outro error:', err);
-        setPuzzleError(err instanceof Error ? err.message : String(err));
-        puzzleOutroRequestStartedRef.current = false;
+        console.warn('[PuzzleBreak] Outro error — using fallback outro:', err);
+        setPuzzleOutroText(buildPuzzleOutroFallback(
+          puzzleTurnHistory,
+          currentPuzzle.fen.split(' ')[1] === 'b' ? 'b' : 'w',
+        ));
+        setPuzzleStreamText('');
+        setPuzzleThinkingText('');
       }
     })();
   }, [apiKey, commentatorModel?.id, currentPuzzle, ollamaBaseUrl, provider, puzzleCommentaryReasoningEffort, puzzleIsComplete, puzzleOutroText, puzzleTurnHistory]);

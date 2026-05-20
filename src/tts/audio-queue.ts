@@ -41,7 +41,6 @@ export class AudioNarrationQueue {
   private playing = false;
   private processingPromise: Promise<void> | null = null;
   private paused = false;
-  private interrupted = false;
   private volume = 0.8;
   private audioContext: AudioContext | null = null;
   private currentSource: AudioBufferSourceNode | null = null;
@@ -59,6 +58,8 @@ export class AudioNarrationQueue {
   private _idleSince: number = 0;
   /** Rolling window of dead air gaps (ms) — last 10. */
   private _deadAirGaps: number[] = [];
+  /** Monotonic playback generation; incrementing cancels stale async work. */
+  private generation = 0;
 
   private getContext(): AudioContext {
     if (!this.audioContext) {
@@ -150,18 +151,18 @@ export class AudioNarrationQueue {
    * Stops any playing audio, clears the queue, then enqueues the new text.
    */
   interruptAndPlay(text: string, options?: TtsSynthesizeOptions): void {
-    this.interrupted = true;
+    this.generation++;
     this.queue = [];
     this._entryCount = 0;
     this._lastFiredEntryId = null;
     this.prefetchPromise = null;
+    this.processingPromise = null;
 
     if (this.currentSource) {
       try { this.currentSource.stop(); } catch { /* already stopped */ }
       this.currentSource = null;
     }
     this.playing = false;
-    this.interrupted = false;
 
     // Clear board highlights
     this.onSentenceStart?.('', [], EMPTY_ANNOTATIONS);
@@ -185,9 +186,9 @@ export class AudioNarrationQueue {
   }
 
   stop(): void {
+    this.generation++;
     this.queue = [];
     this.paused = false;
-    this.interrupted = true;
     this._entryCount = 0;
     this._lastFiredEntryId = null;
     this.prefetchPromise = null;
@@ -197,10 +198,20 @@ export class AudioNarrationQueue {
       this.currentSource = null;
     }
     this.playing = false;
-    this.interrupted = false;
 
     // Clear board highlights
     this.onSentenceStart?.('', [], EMPTY_ANNOTATIONS);
+  }
+
+  dispose(): void {
+    this.stop();
+    this.onSentenceStart = null;
+    this.onEntryStart = null;
+    if (this.audioContext) {
+      void this.audioContext.close().catch(() => undefined);
+      this.audioContext = null;
+    }
+    this.gainNode = null;
   }
 
   setVolume(value: number): void {
@@ -251,14 +262,18 @@ export class AudioNarrationQueue {
   private ensureProcessing(): void {
     if (this.processingPromise || this.playing || this.paused || this.queue.length === 0) return;
     this.playing = true;
-    const run = this.processQueue();
-    this.processingPromise = run.finally(() => {
-      this.processingPromise = null;
+    const runGeneration = this.generation;
+    let runPromise: Promise<void>;
+    runPromise = this.processQueue(runGeneration).finally(() => {
+      if (this.processingPromise === runPromise) {
+        this.processingPromise = null;
+      }
     });
+    this.processingPromise = runPromise;
   }
 
-  private async processQueue(): Promise<void> {
-    while (this.queue.length > 0 && !this.paused && !this.interrupted) {
+  private async processQueue(runGeneration: number): Promise<void> {
+    while (runGeneration === this.generation && this.queue.length > 0 && !this.paused) {
       const entry = this.queue.shift()!;
 
       try {
@@ -271,11 +286,10 @@ export class AudioNarrationQueue {
           audioData = await synthesize(entry.spokenText, entry.synthOptions);
         }
 
-        // Check for interrupt after synthesis
-        if (this.interrupted) break;
+        if (runGeneration !== this.generation) break;
 
         // Start prefetching the next segment while playing current
-        if (this.queue.length > 0 && !this.interrupted) {
+        if (runGeneration === this.generation && this.queue.length > 0) {
           const next = this.queue[0];
           this.prefetchPromise = synthesize(next.spokenText, next.synthOptions);
         }
@@ -305,9 +319,9 @@ export class AudioNarrationQueue {
         this.onSentenceStart?.(entry.text, entry.squares, entry.annotations);
 
         // Play the audio
-        await this.playAudioBuffer(audioData);
+        await this.playAudioBuffer(audioData, runGeneration);
       } catch (err) {
-        if (this.interrupted) break;
+        if (runGeneration !== this.generation) break;
         console.warn('[TTS Queue] Synthesis/playback error:', err);
 
         // Still fire entry-start callback on synthesis failure so the board
@@ -321,6 +335,10 @@ export class AudioNarrationQueue {
       }
     }
 
+    if (runGeneration !== this.generation) {
+      return;
+    }
+
     this.playing = false;
     this.prefetchPromise = null;
     if (this.queue.length === 0) {
@@ -331,7 +349,7 @@ export class AudioNarrationQueue {
     }
   }
 
-  private async playAudioBuffer(data: ArrayBuffer): Promise<void> {
+  private async playAudioBuffer(data: ArrayBuffer, runGeneration: number): Promise<void> {
     const ctx = this.getContext();
 
     if (ctx.state === 'suspended') {
@@ -339,6 +357,8 @@ export class AudioNarrationQueue {
     }
 
     const audioBuffer = await ctx.decodeAudioData(data.slice(0));
+    if (runGeneration !== this.generation) return;
+
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(this.gainNode!);

@@ -32,6 +32,7 @@ import { getOpeningById } from '../engine/openings';
 import { useBenchmarkStore } from './benchmarkStore';
 import { getStockfishEval } from '../chess/stockfish';
 import type { LLMProviderConfig } from '../llm/client';
+import { createStreamingBridge } from './streamingBridge';
 
 function autoName(config: GauntletTournamentConfig): string {
   const challenger = config.challenger.displayName || config.challenger.model;
@@ -86,6 +87,15 @@ function hydratePersistedGameState(
     moveHistory: [...priorMoveHistory],
     currentTurn: Math.floor(priorMoveHistory.length / 2) + 1,
     currentColor: (priorMoveHistory.length % 2 === 0 ? 'w' : 'b') as 'w' | 'b',
+  };
+}
+
+function buildResumedPreviewState(gameState: GameState): GameState {
+  return {
+    ...gameState,
+    status: 'in_progress',
+    result: undefined,
+    endedAt: undefined,
   };
 }
 
@@ -542,7 +552,7 @@ export const useTournamentStore = create<TournamentStore>()(
       },
 
       resumeGame: (matchIndex, pairIndex, slotIndex) => {
-        const { tournament, activeRuntime, abortedGames } = get();
+        const { tournament, activeRuntime, abortedGames, llmConfig } = get();
         if (!tournament) return;
         if (matchIndex < 0 || matchIndex >= tournament.matches.length) return;
 
@@ -593,11 +603,13 @@ export const useTournamentStore = create<TournamentStore>()(
         updated.matches[matchIndex] = match;
         updated.currentMatchIndex = matchIndex;
 
+        const resumedPreviewState = buildResumedPreviewState(aborted.gameState);
+
         set({
           tournament: updated,
-          waitingForStart: true,
+          waitingForStart: !llmConfig,
           activeRuntime: null,
-          activeGameState: aborted.gameState,
+          activeGameState: resumedPreviewState,
           streamingText: '',
           streamingModel: '',
           commentary: '',
@@ -615,6 +627,10 @@ export const useTournamentStore = create<TournamentStore>()(
             abortedKey: abortKey,
           },
         });
+
+        if (llmConfig) {
+          setTimeout(() => runNextGame(llmConfig), 0);
+        }
       },
 
       // --- Replay actions ---
@@ -693,6 +709,9 @@ export const useTournamentStore = create<TournamentStore>()(
           replayMoves,
           replayResult,
         });
+        const streamBridge = createStreamingBridge((text, model) => {
+          useTournamentStore.setState({ streamingText: text, streamingModel: model });
+        });
 
         // No gate needed — moves fire with a simple delay (like LLM think time),
         // commentary + TTS run async in the background at their own pace.
@@ -708,7 +727,7 @@ export const useTournamentStore = create<TournamentStore>()(
         });
 
         runtime.onStream((text: string, model: string) => {
-          useTournamentStore.setState({ streamingText: text, streamingModel: model });
+          streamBridge.push(text, model);
         });
 
         set({
@@ -770,6 +789,7 @@ export const useTournamentStore = create<TournamentStore>()(
               streamingText: '',
               streamingModel: '',
             });
+            streamBridge.dispose();
           })
           .catch((err) => {
             console.error('Replay runtime failed:', err);
@@ -780,6 +800,7 @@ export const useTournamentStore = create<TournamentStore>()(
               streamingText: '',
               streamingModel: '',
             });
+            streamBridge.dispose();
           });
       },
 
@@ -1228,6 +1249,9 @@ function runNextGame(llmConfig: LLMProviderConfig): void {
   // Create and start game
   const runtime = new GameRuntime(white, black, llmConfig,
     Object.keys(runtimeOptions).length > 0 ? runtimeOptions : undefined);
+  const streamBridge = createStreamingBridge((text, model) => {
+    useTournamentStore.setState({ streamingText: text, streamingModel: model });
+  });
 
   runtime.subscribe((state: GameState, event: GameEvent) => {
     useTournamentStore.setState({ activeGameState: state });
@@ -1239,7 +1263,7 @@ function runNextGame(llmConfig: LLMProviderConfig): void {
   });
 
   runtime.onStream((text: string, model: string) => {
-    useTournamentStore.setState({ streamingText: text, streamingModel: model });
+    streamBridge.push(text, model);
   });
 
   // Track the resume key so onGameComplete can clean up aborted state
@@ -1289,6 +1313,7 @@ function runNextGame(llmConfig: LLMProviderConfig): void {
         streamingText: '',
         streamingModel: '',
       });
+      streamBridge.dispose();
       onGameComplete(finalState, matchIdx, pairIdx, slot, challengerColor, pair.opening?.id || null);
     })
     .catch((err) => {
@@ -1301,6 +1326,7 @@ function runNextGame(llmConfig: LLMProviderConfig): void {
         streamingModel: '',
         waitingForStart: true,
       });
+      streamBridge.dispose();
     });
 }
 

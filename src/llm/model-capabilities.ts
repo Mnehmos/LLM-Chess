@@ -323,14 +323,21 @@ export function shouldStream(modelId: string): boolean {
   return getModelCapability(modelId).supportsStreaming;
 }
 
+function isGpt5FamilyModel(modelId: string): boolean {
+  return /\bgpt-5(?:[.-]|$)/i.test(modelId);
+}
+
+function isGpt54FamilyModel(modelId: string): boolean {
+  return /\bgpt-5\.4(?:[.-]|$)/i.test(modelId);
+}
+
 /**
  * Known reasoning model patterns.
  * These models have internal chain-of-thought that can be very slow.
  * We cap their reasoning effort to keep response times reasonable for chess.
  */
 const REASONING_MODEL_PATTERNS = [
-  /\bgpt-5\b/i,          // GPT-5.x family (5.2, 5.3, 5.4, 5.5)
-  /\bchatgpt-5\b/i,      // ChatGPT 5.x family (5.5)
+  /\bchatgpt-5\b/i,      // ChatGPT 5.x family (5.5); gpt-5.x handled via isGpt5FamilyModel
   /\bo[134]-/i,          // o1-, o3-, o4-
   /\bclaude-3\.7\b/i,    // Claude Sonnet 3.7 reasoning
   /\bclaude-(?:sonnet|opus)-4(?:\.\d+)?\b/i, // Claude 4 / 4.1 / 4.5 / 4.6 / 4.7 families
@@ -368,7 +375,10 @@ function isGeminiReasoningModel(modelId: string): boolean {
 }
 
 export function buildReasoningParams(modelId: string, effortOverride?: string): Record<string, unknown> | undefined {
-  const isReasoning = isGeminiReasoningModel(modelId) || REASONING_MODEL_PATTERNS.some(p => p.test(modelId));
+  const isReasoning =
+    isGpt5FamilyModel(modelId)
+    || isGeminiReasoningModel(modelId)
+    || REASONING_MODEL_PATTERNS.some(p => p.test(modelId));
   if (!isReasoning) return undefined;
   const effort = effortOverride || 'high';
   if (effort === 'none') return undefined; // Disable reasoning entirely
@@ -394,7 +404,7 @@ export function getAdaptiveMoveTokenBudget(
     : 'high';
 
   const isLargeOutputModel =
-    /\bgpt-5(\.|-|$)/i.test(modelId)
+    isGpt5FamilyModel(modelId)
     || /\bchatgpt-5/i.test(modelId)
     || /\bcodex\b/i.test(modelId)
     || /\bclaude-3\.7\b/i.test(modelId)
@@ -413,6 +423,21 @@ export function getAdaptiveMoveTokenBudget(
         high: { min: 7000, max: 12000 },
         xhigh: { min: 9000, max: 16000 },
       };
+
+  // Keep the GPT-5.4 family on the same larger reasoning budget path,
+  // including OpenAI/OpenRouter variants like gpt-5.4-mini and gpt-5.4-nano.
+  if (isGpt54FamilyModel(modelId)) {
+    const gpt54Band: Record<string, { min: number; max: number }> = {
+      low: { min: 3000, max: 32000 },
+      medium: { min: 5000, max: 64000 },
+      high: { min: 7000, max: 128000 },
+      xhigh: { min: 9000, max: 128000 },
+    };
+    const band = gpt54Band[effort] ?? gpt54Band.high;
+    if (requested < band.min) return band.min;
+    if (requested > band.max) return band.max;
+    return requested;
+  }
 
   const band = bandByEffort[effort] ?? bandByEffort.high;
   if (requested < band.min) return band.min;

@@ -46,7 +46,6 @@ interface BenchmarkState {
   aggregates: ConditionAggregate[];
   reports: GeneratedReport[];
   findings: Finding[];
-  sourceGames: GameState[];
   initialize: () => Promise<void>;
   refresh: () => Promise<void>;
   recordGame: (game: GameState, options?: Partial<RecordGameOptions>) => void;
@@ -116,7 +115,6 @@ export const useBenchmarkStore = create<BenchmarkState>()((set, get) => ({
   aggregates: [],
   reports: [],
   findings: [],
-  sourceGames: [],
 
   initialize: async () => {
     if (get().initialized || get().loading) return;
@@ -189,7 +187,6 @@ export const useBenchmarkStore = create<BenchmarkState>()((set, get) => ({
     set({
       loading: true,
       error: null,
-      sourceGames: [...state.sourceGames, game],
     });
 
     void ingestAndRebuild(state.benchmarkGames, state.profiles, game, ingestOptions)
@@ -225,7 +222,6 @@ export const useBenchmarkStore = create<BenchmarkState>()((set, get) => ({
         aggregates: [],
         reports: [],
         findings: [],
-        sourceGames: [],
       });
     } catch (error) {
       set({

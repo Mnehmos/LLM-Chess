@@ -31,6 +31,7 @@ export function LiveStats({ game, streamingText: propStreamText, streamingModel:
   const storeStreamModel = useGameStore(s => s.streamingModel);
   const streamingText = propStreamText ?? storeStreamText;
   const streamingModel = propStreamModel ?? storeStreamModel;
+  const [now, setNow] = useState(() => Date.now());
 
   const whiteMoves = game.moveHistory.filter(m => m.color === 'w');
   const blackMoves = game.moveHistory.filter(m => m.color === 'b');
@@ -56,7 +57,6 @@ export function LiveStats({ game, streamingText: propStreamText, streamingModel:
     ? (blackMoves.filter(m => m.attempts === 1).length / blackMoves.length * 100)
     : 100;
 
-  // Token counter: sum from LLMResponded events
   const { whiteTokens, blackTokens } = useMemo(() => {
     let wt = 0, bt = 0;
     for (const e of game.eventLog) {
@@ -68,15 +68,45 @@ export function LiveStats({ game, streamingText: propStreamText, streamingModel:
     return { whiteTokens: wt, blackTokens: bt };
   }, [game.eventLog]);
 
-  // Material advantage
   const material = useMemo(() => computeMaterial(game.fen), [game.fen]);
   const advantage = material.white - material.black;
+  const pendingRequest = useMemo(() => {
+    let latestPrompted: GameState['eventLog'][number] | null = null;
+    for (let i = game.eventLog.length - 1; i >= 0; i--) {
+      const event = game.eventLog[i];
+      if (event.type === 'LLMPrompted') {
+        latestPrompted = event;
+        break;
+      }
+      if (
+        event.type === 'LLMResponded'
+        || event.type === 'MoveApplied'
+        || event.type === 'GameEnded'
+        || event.type === 'GameAborted'
+        || event.type === 'ErrorOccurred'
+      ) {
+        return null;
+      }
+    }
+    return latestPrompted?.type === 'LLMPrompted'
+      ? {
+          model: latestPrompted.payload.model,
+          color: latestPrompted.payload.color,
+          timestamp: latestPrompted.timestamp,
+        }
+      : null;
+  }, [game.eventLog]);
+
+  useEffect(() => {
+    if (!pendingRequest || streamingText) return undefined;
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [pendingRequest, streamingText]);
 
   return (
     <div className="p-4 bg-surface-1 rounded-lg">
       <h3 className="text-sm font-semibold text-text-secondary mb-3">Live Stats</h3>
 
-      {/* Material advantage bar */}
       <MaterialBar advantage={advantage} whiteName={game.white.displayName.split('/').pop()} blackName={game.black.displayName.split('/').pop()} />
 
       <div className="grid grid-cols-3 gap-2 text-sm mt-3">
@@ -106,12 +136,17 @@ export function LiveStats({ game, streamingText: propStreamText, streamingModel:
         </div>
       )}
 
-      {/* Streaming token display */}
       {streamingText ? (
         <StreamingDisplay text={streamingText} model={streamingModel} />
+      ) : pendingRequest ? (
+        <PendingRequestDisplay
+          model={pendingRequest.model}
+          color={pendingRequest.color}
+          elapsedMs={Math.max(0, now - pendingRequest.timestamp)}
+        />
       ) : (
         <div className="mt-3 pt-3 border-t border-surface-2 text-xs text-text-muted">
-          Turn {game.currentTurn} &middot; {(game.currentColor === 'w' ? game.white.displayName.split('/').pop() : game.black.displayName.split('/').pop()) || (game.currentColor === 'w' ? 'White' : 'Black')} to move &middot; {game.status}
+          Turn {game.currentTurn} · {(game.currentColor === 'w' ? game.white.displayName.split('/').pop() : game.black.displayName.split('/').pop()) || (game.currentColor === 'w' ? 'White' : 'Black')} to move · {game.status}
         </div>
       )}
     </div>
@@ -146,38 +181,12 @@ function MaterialBar({ advantage, whiteName, blackName }: { advantage: number; w
   );
 }
 
-/**
- * Shows the player model's streaming output while it thinks.
- * `text` is a raw delta token (one per call) from the LLM stream.
- * We accumulate here so the store doesn't need changing, and debounce
- * display updates so the box doesn't repaint on every single token.
- */
 function StreamingDisplay({ text, model }: { text: string; model: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [accumulated, setAccumulated] = useState('');
-  const [displayed, setDisplayed] = useState('');
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Accumulate deltas; reset when stream ends (text='')
-  useEffect(() => {
-    if (!text) {
-      setAccumulated('');
-      setDisplayed('');
-      if (timerRef.current) clearTimeout(timerRef.current);
-      return;
-    }
-    // Strip 🧠 prefix from reasoning tokens — show content as plain text
-    const delta = text.startsWith('\u{1F9E0}') ? text.slice(2) : text;
-    setAccumulated(prev => prev + delta);
-  }, [text]);
-
-  // Debounce display: update at most ~5×/sec
-  useEffect(() => {
-    if (!accumulated) return;
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setDisplayed(accumulated), 200);
-    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [accumulated]);
+  const displayed = useMemo(
+    () => text.replaceAll('\u{1F9E0}', `${String.fromCodePoint(0x1F9E0)} `),
+    [text],
+  );
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -196,7 +205,23 @@ function StreamingDisplay({ text, model }: { text: string; model: string }) {
         className="h-24 overflow-y-auto text-xs font-mono text-text-secondary bg-surface-0 rounded px-2 py-1.5 whitespace-pre-wrap break-all"
       >
         {displayed || <span className="text-text-muted/40 italic">streaming…</span>}
-        {accumulated && <span className="animate-pulse text-purple-accent">|</span>}
+        {displayed && <span className="animate-pulse text-purple-accent">|</span>}
+      </div>
+    </div>
+  );
+}
+
+function PendingRequestDisplay({ model, color, elapsedMs }: { model: string; color: 'w' | 'b'; elapsedMs: number }) {
+  return (
+    <div className="mt-3 pt-3 border-t border-surface-2">
+      <div className="flex items-center gap-2 mb-1">
+        <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+        <span className="text-xs text-blue-300 font-medium">
+          {model.split('/').pop()} request in flight
+        </span>
+      </div>
+      <div className="text-xs text-text-muted">
+        {color === 'w' ? 'White' : 'Black'} move requested · waiting for first token · {(elapsedMs / 1000).toFixed(1)}s
       </div>
     </div>
   );
@@ -224,14 +249,16 @@ function ResultBadge({ result, white, black }: { result: NonNullable<GameState['
   }
   if (result.outcome === 'draw') {
     return (
-      <div className="text-sm text-text-secondary">
-        Draw by {result.reason.replace(/_/g, ' ')}
+      <div className="text-sm">
+        <span className="text-purple-light font-medium">Draw</span>
+        <span className="text-text-secondary"> by {result.reason.replace(/_/g, ' ')}</span>
       </div>
     );
   }
   return (
-    <div className="text-sm text-warning">
-      Game aborted: {result.reason}
+    <div className="text-sm">
+      <span className="text-warning font-medium">Aborted</span>
+      <span className="text-text-secondary">: {result.reason}</span>
     </div>
   );
 }
