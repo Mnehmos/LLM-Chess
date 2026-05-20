@@ -1,12 +1,12 @@
 /**
  * Compose a frame sequence + (optional) narration audio into an MP4
- * via ffmpeg-static. No audio mixing in Phase 3 — the SPA plays TTS
- * live during capture but the audio is NOT recorded by CDP screencast;
- * we emit a silent MP4 for now. A follow-up can add pre-rendered
- * TTS clips composed at segmentTimings offsets (Clio's pattern).
+ * via ffmpeg-static.
  *
- * Silent-MP4-first keeps Phase 3 reviewable. Audio mux lands as a
- * Phase 3.1 follow-up after Phase 3 merges.
+ * Phase 3 shipped silent MP4s; Phase 3.1 adds audio mux. The SPA's
+ * AudioNarrationQueue taps a MediaRecorder onto its gain node in
+ * broadcast mode, base64-encodes the result onto the export bridge,
+ * and the orchestrator writes that webm/opus blob to disk before
+ * calling here. ffmpeg re-encodes to AAC for MP4 compatibility.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -23,6 +23,13 @@ export interface ComposeOptions {
   outputPath: string;
   /** Absolute path to the ffmpeg binary. */
   ffmpegPath: string;
+  /**
+   * Optional path to an audio file (webm/opus from MediaRecorder, or
+   * any ffmpeg-decodable container) to mux into the MP4. When set,
+   * the audio is re-encoded to AAC and the output uses `-shortest` so
+   * the MP4 ends with whichever stream finishes first.
+   */
+  audioPath?: string;
 }
 
 /**
@@ -40,12 +47,14 @@ export interface ComposeOptions {
  */
 export async function composeMp4(options: ComposeOptions): Promise<void> {
   await mkdir(path.dirname(options.outputPath), { recursive: true });
+  const hasAudio = Boolean(options.audioPath);
   const args = [
     '-y',
     '-framerate',
     String(options.frameRate),
     '-i',
     path.join(options.frameDir, 'frame_%08d.jpg'),
+    ...(hasAudio ? ['-i', options.audioPath as string] : []),
     '-c:v',
     'libx264',
     '-pix_fmt',
@@ -56,9 +65,27 @@ export async function composeMp4(options: ComposeOptions): Promise<void> {
     'veryfast',
     '-crf',
     '20',
+    ...(hasAudio
+      ? [
+          '-c:a',
+          'aac',
+          '-b:a',
+          '160k',
+          // Map: video from input 0, audio from input 1.
+          '-map',
+          '0:v:0',
+          '-map',
+          '1:a:0',
+          // End at the shorter of the two streams. The audio
+          // recorder starts after the video, so the audio is
+          // typically slightly shorter; without -shortest the MP4
+          // would end with a tail of silent video.
+          '-shortest',
+        ]
+      : []),
     options.outputPath,
   ];
-  console.log(`[ffmpeg] composing ${options.outputPath}`);
+  console.log(`[ffmpeg] composing ${options.outputPath}${hasAudio ? ' (with audio)' : ' (silent)'}`);
   await runFfmpeg(options.ffmpegPath, args);
 }
 

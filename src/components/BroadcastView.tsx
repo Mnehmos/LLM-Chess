@@ -45,6 +45,7 @@ export function BroadcastView() {
   );
 
   const startedRef = useRef(false);
+  const endedRef = useRef(false);
   const commentatorAppliedRef = useRef(false);
 
   // Apply the episode's commentator model id to the replay store
@@ -104,6 +105,11 @@ export function BroadcastView() {
           audioQueue.setSegmentStartCallback((moveIndex, offsetMs) => {
             exportBridge.__recordSegmentTiming(moveIndex, offsetMs);
           });
+          // Phase 3.1: tap the queue's gain node via MediaRecorder
+          // so the capture pipeline can mux the rendered narration
+          // into the final MP4. No-op when TTS is disabled (queue
+          // never plays anything).
+          audioQueue.startRecording();
         } else {
           console.warn(
             '[BroadcastView] No active AudioNarrationQueue at start() — segment timings will not be recorded',
@@ -155,20 +161,26 @@ export function BroadcastView() {
   // End flag: replay reaches a terminal status, OR a short capture's
   // end ply has been replayed. GameStatus is a discriminated union —
   // every value except 'created' and 'in_progress' is terminal.
+  //
+  // Phase 3.1: also drain the audio queue, stop the MediaRecorder,
+  // and store the recorded narration on the bridge as base64 so the
+  // capture pipeline can mux it into the MP4.
   useEffect(() => {
     if (!activeGameState) return;
     const status = activeGameState.status;
-    if (status !== 'created' && status !== 'in_progress') {
+    const isTerminal = status !== 'created' && status !== 'in_progress';
+    const shortDone = shortRange && activeGameState.moveHistory.length >= shortRange.endPly + 1;
+    if (!isTerminal && !shortDone) return;
+
+    // Once-only: the effect re-runs on every game state change, but
+    // we want to flip ended (and stop the recorder) exactly once.
+    if (endedRef.current) return;
+    endedRef.current = true;
+
+    void finalizeRecording().finally(() => {
       exportBridge.__markEnded();
-      return;
-    }
-    if (shortRange && activeGameState.moveHistory.length >= shortRange.endPly + 1) {
-      // The replay store's stopReplay() flips the runtime out of
-      // replayMode; the activeGameState's status stays 'in_progress'
-      // momentarily so we set ended explicitly here.
-      exportBridge.__markEnded();
-      stopReplay();
-    }
+      if (shortDone && !isTerminal) stopReplay();
+    });
   }, [activeGameState, shortRange, stopReplay]);
 
   if (loadError) {
@@ -283,4 +295,43 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
     commentatorModel: episode.commentator.model,
     shortRange,
   };
+}
+
+/**
+ * Drain the audio queue, stop the MediaRecorder, base64-encode the
+ * resulting webm blob, and store it on the export bridge.
+ *
+ * The audio queue's narrationGate already waits for in-flight TTS
+ * synthesis before the runtime advances, but it doesn't wait for
+ * the FINAL clip to finish playing — so we waitUntilDone() and add
+ * a small grace window to let the last MediaRecorder chunk land
+ * before stopping. Anything else risks clipping the closing
+ * narration.
+ *
+ * No-op when TTS was disabled (audio queue's stopRecording returns
+ * null because startRecording was never called effectively).
+ */
+async function finalizeRecording(): Promise<void> {
+  const audioQueue = getActiveAudioNarrationQueue();
+  if (!audioQueue) return;
+  try {
+    await audioQueue.waitUntilDone();
+  } catch {
+    // waitUntilDone() throwing means there was nothing to drain.
+  }
+  // Grace window for the last MediaRecorder data chunk.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const blob = await audioQueue.stopRecording();
+  if (!blob || blob.size === 0) return;
+  const arrayBuffer = await blob.arrayBuffer();
+  // Chunked encode — String.fromCharCode.apply with a large array
+  // hits the JS engine's argument count limit (262144 on V8).
+  const bytes = new Uint8Array(arrayBuffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
+  }
+  const base64 = btoa(binary);
+  exportBridge.__setRecordedAudio(base64);
 }

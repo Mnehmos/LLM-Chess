@@ -47,6 +47,17 @@ export interface ExportBridgeState {
    * Optional to keep the contract backward-compatible with Phase 1.
    */
   renderPlan?: unknown;
+  /**
+   * Base64-encoded webm audio recorded by AudioNarrationQueue during
+   * broadcast playback. Populated after `ended` fires. The Phase 3.1
+   * capture pipeline decodes this, writes it to disk, and ffmpeg-muxes
+   * it onto the frame sequence to produce an MP4 with audio.
+   *
+   * Empty string while recording is in progress or if recording was
+   * never started (TTS off). The mime type is always
+   * `audio/webm;codecs=opus` (MediaRecorder default on Chromium).
+   */
+  recordedAudio: string;
 }
 
 /**
@@ -80,6 +91,8 @@ export interface ExportBridge {
   __recordSegmentTiming(moveIndex: number, offsetMs: number): void;
   /** Internal: BroadcastView attaches the render plan when start() runs. */
   __setRenderPlan(plan: unknown): void;
+  /** Internal: BroadcastView stores the final recorded audio after ended. */
+  __setRecordedAudio(base64: string): void;
   /** Internal: installExportBridge sets broadcastMode at boot. */
   __setBroadcastMode(value: boolean): void;
 }
@@ -92,6 +105,7 @@ const state: ExportBridgeState = {
   audioReady: false,
   ended: false,
   segmentTimings: {},
+  recordedAudio: '',
 };
 
 let hooks: ExportBridgeHooks | null = null;
@@ -103,6 +117,7 @@ export const exportBridge: ExportBridge = {
     state.audioReady = false;
     state.ended = false;
     state.segmentTimings = {};
+    state.recordedAudio = '';
     hooks?.reset();
   },
   start() {
@@ -138,6 +153,9 @@ export const exportBridge: ExportBridge = {
   },
   __setRenderPlan(plan) {
     state.renderPlan = plan;
+  },
+  __setRecordedAudio(base64) {
+    state.recordedAudio = base64;
   },
   __setBroadcastMode(value) {
     state.broadcastMode = value;
