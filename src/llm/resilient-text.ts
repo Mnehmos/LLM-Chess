@@ -92,6 +92,17 @@ function mergeStreamText(previous: string, incoming: string): string {
   return previous + incoming;
 }
 
+const MAX_THINKING_CHARS = 4000;
+const THINKING_TRUNCATED_SUFFIX = '\n\n[thinking truncated]';
+
+function mergeThinkingText(previous: string, incoming: string): string {
+  if (!incoming) return previous;
+  if (previous.endsWith(THINKING_TRUNCATED_SUFFIX)) return previous;
+  const merged = mergeStreamText(previous, incoming);
+  if (merged.length <= MAX_THINKING_CHARS) return merged;
+  return merged.slice(0, MAX_THINKING_CHARS) + THINKING_TRUNCATED_SUFFIX;
+}
+
 function defaultFailureClassifier(result: ResilientAttemptResult): ResilientFailureReason | null {
   const trimmed = result.text.trim();
   if (result.aborted) return null;
@@ -189,7 +200,7 @@ async function runSingleAttempt(params: ResilientTextParams): Promise<ResilientA
       if (settled || params.abortSignal?.aborted || timedOut) return;
       resetStallTimer();
       if (chunk.startsWith('\u{1F9E0}')) {
-        thinking = mergeStreamText(thinking, chunk.slice(2));
+        thinking = mergeThinkingText(thinking, chunk.slice(2));
         params.onThinking?.(thinking);
         return;
       }

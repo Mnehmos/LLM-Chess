@@ -7,6 +7,7 @@ import { GameRuntime } from '../engine/runtime';
 import { getStockfishEval } from '../chess/stockfish';
 import type { LLMProviderConfig } from '../llm/client';
 import { Chess } from 'chess.js';
+import { createStreamingBridge } from './streamingBridge';
 
 interface GameStore {
   runtime: GameRuntime | null;
@@ -64,6 +65,9 @@ export const useGameStore = create<GameStore>()((set, get) => ({
     const black: PlayerConfig = { ...blackConfig, id: uuid(), color: 'b' };
 
     const runtime = new GameRuntime(white, black, llmConfig);
+    const streamBridge = createStreamingBridge((text, model) => {
+      set({ streamingText: text, streamingModel: model });
+    });
 
     runtime.subscribe((state: GameState, event: GameEvent) => {
       set({ gameState: state });
@@ -75,7 +79,7 @@ export const useGameStore = create<GameStore>()((set, get) => ({
     });
 
     runtime.onStream((text: string, model: string) => {
-      set({ streamingText: text, streamingModel: model });
+      streamBridge.push(text, model);
     });
 
     set({
@@ -102,12 +106,14 @@ export const useGameStore = create<GameStore>()((set, get) => ({
               ),
             }
           : finalState;
+        streamBridge.dispose();
         set({ isRunning: false, gameState: enrichedState });
       })
       .catch((err) => {
         const message = err instanceof Error ? err.message : String(err);
         console.error('Game runtime failed:', message);
         runtime.abort(`Runtime error: ${message}`);
+        streamBridge.dispose();
         set({ isRunning: false, isPaused: false, gameState: runtime.getState() });
       });
   },

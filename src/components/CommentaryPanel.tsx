@@ -26,13 +26,24 @@ interface CommentaryPanelProps {
 }
 
 const narratedEntryIdsBySession = new Map<string, Set<string>>();
+const MAX_NARRATED_SESSIONS = 12;
+
+function rememberNarratedSession(sessionKey: string, entries: Set<string>): void {
+  narratedEntryIdsBySession.delete(sessionKey);
+  narratedEntryIdsBySession.set(sessionKey, entries);
+  while (narratedEntryIdsBySession.size > MAX_NARRATED_SESSIONS) {
+    const oldestKey = narratedEntryIdsBySession.keys().next().value;
+    if (!oldestKey) break;
+    narratedEntryIdsBySession.delete(oldestKey);
+  }
+}
 
 function getNarratedEntryIds(sessionKey: string): Set<string> {
   let existing = narratedEntryIdsBySession.get(sessionKey);
   if (!existing) {
     existing = new Set<string>();
-    narratedEntryIdsBySession.set(sessionKey, existing);
   }
+  rememberNarratedSession(sessionKey, existing);
   return existing;
 }
 
@@ -71,17 +82,20 @@ export function CommentaryPanel({ entries, commentatorModelName, sessionKey, onN
     if (!audioQueueRef.current) {
       audioQueueRef.current = new AudioNarrationQueue();
     }
-    audioQueueRef.current.setVolume(ttsVolume);
     // Register narration gate so game completion waits for audio to finish
     registerNarrationGate(() => audioQueueRef.current?.waitUntilDone() ?? Promise.resolve());
     // Register stop callback so aborting/skipping kills audio immediately
     registerNarrationStop(() => audioQueueRef.current?.stop());
     return () => {
-      // Stop any playing audio when component unmounts or effect re-runs
-      audioQueueRef.current?.stop();
+      audioQueueRef.current?.dispose();
+      audioQueueRef.current = null;
       registerNarrationGate(null);
       registerNarrationStop(null);
     };
+  }, []);
+
+  useEffect(() => {
+    audioQueueRef.current?.setVolume(ttsVolume);
   }, [ttsVolume]);
 
   // Wrap in a ref so the effect below never changes deps array size

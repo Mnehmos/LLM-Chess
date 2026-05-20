@@ -100,6 +100,26 @@ function genId(): string {
   return `cq-${++nextId}-${Date.now()}`;
 }
 
+const MAX_STREAMING_THINKING_CHARS = 4000;
+const MAX_STREAMING_TEXT_CHARS = 6000;
+const THINKING_TRUNCATED_SUFFIX = '\n\n[thinking truncated]';
+const TEXT_TRUNCATED_SUFFIX = '\n\n[stream truncated]';
+const STREAMING_ENTRY_EMIT_MS = 125;
+
+function clampStreamingThinking(text: string): string {
+  if (!text) return text;
+  if (text.endsWith(THINKING_TRUNCATED_SUFFIX)) return text;
+  if (text.length <= MAX_STREAMING_THINKING_CHARS) return text;
+  return text.slice(0, MAX_STREAMING_THINKING_CHARS) + THINKING_TRUNCATED_SUFFIX;
+}
+
+function clampStreamingText(text: string): string {
+  if (!text) return text;
+  if (text.endsWith(TEXT_TRUNCATED_SUFFIX)) return text;
+  if (text.length <= MAX_STREAMING_TEXT_CHARS) return text;
+  return text.slice(0, MAX_STREAMING_TEXT_CHARS) + TEXT_TRUNCATED_SUFFIX;
+}
+
 /**
  * Compute dynamic max tokens based on available dead air time.
  *
@@ -251,6 +271,7 @@ export class CommentaryQueue {
   private entries: CommentaryEntry[] = [];
   private activeEntryIndex = -1;
   private listeners: Set<UpdateListener> = new Set();
+  private streamEmitTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private config: CommentaryQueueConfig;
   private lastCommentaryText = '';
@@ -575,6 +596,7 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
   destroy(): void {
     this.cancelFiller();
     this.cancelActiveGeneration();
+    this.clearScheduledEmit();
     if (this.fillerWatchdog) {
       clearInterval(this.fillerWatchdog);
       this.fillerWatchdog = null;
@@ -646,6 +668,21 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
     for (const listener of this.listeners) {
       listener(snapshot);
     }
+  }
+
+  private clearScheduledEmit(): void {
+    if (this.streamEmitTimer) {
+      clearTimeout(this.streamEmitTimer);
+      this.streamEmitTimer = null;
+    }
+  }
+
+  private scheduleStreamingEmit(): void {
+    if (this.destroyed || this.streamEmitTimer) return;
+    this.streamEmitTimer = setTimeout(() => {
+      this.streamEmitTimer = null;
+      this.emit();
+    }, STREAMING_ENTRY_EMIT_MS);
   }
 
   private cancelActiveGeneration(): void {
@@ -838,27 +875,28 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
   private updateEntryText(entryIndex: number, text: string): void {
     if (this.destroyed || entryIndex >= this.entries.length) return;
     const updated = [...this.entries];
-    updated[entryIndex] = { ...updated[entryIndex], text, streaming: true };
+    updated[entryIndex] = { ...updated[entryIndex], text: clampStreamingText(text), streaming: true };
     this.entries = updated;
-    this.emit();
+    this.scheduleStreamingEmit();
   }
 
   private updateEntryThinking(entryIndex: number, thinking: string): void {
     if (this.destroyed || entryIndex >= this.entries.length) return;
     const updated = [...this.entries];
-    updated[entryIndex] = { ...updated[entryIndex], thinking, streaming: true };
+    updated[entryIndex] = { ...updated[entryIndex], thinking: clampStreamingThinking(thinking), streaming: true };
     this.entries = updated;
-    this.emit();
+    this.scheduleStreamingEmit();
   }
 
   private completeEntry(entryIndex: number, rawText: string, isFiller = false): void {
     if (this.destroyed || entryIndex >= this.entries.length) return;
+    this.clearScheduledEmit();
 
     // Parse and strip annotation tags from the final text
     const { clean, annotations } = parseAnnotations(rawText);
 
     const updated = [...this.entries];
-    updated[entryIndex] = { ...updated[entryIndex], text: clean, rawText: rawText, streaming: false, annotations };
+    updated[entryIndex] = { ...updated[entryIndex], text: clean, rawText: rawText, streaming: false, annotations, thinking: undefined };
     this.entries = updated;
 
     if (isFiller) {

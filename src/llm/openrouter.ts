@@ -196,6 +196,14 @@ export class OpenRouterClient {
       body.stream_options = { include_usage: true };
     }
 
+    console.log(
+      '[OpenRouter] POST /chat/completions model=%s stream=%s max_tokens=%s reasoning=%s messages=%d',
+      model,
+      isStreaming,
+      body.max_tokens,
+      reasoning ? JSON.stringify(reasoning) : 'none',
+      messages.length,
+    );
     const startTime = Date.now();
     const response = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
       method: 'POST',
@@ -210,6 +218,13 @@ export class OpenRouterClient {
 
     if (!response.ok) {
       const errorText = await response.text();
+      console.warn(
+        '[OpenRouter] Request failed: model=%s status=%d elapsedMs=%d body=%s',
+        model,
+        response.status,
+        Date.now() - startTime,
+        errorText.slice(0, 400),
+      );
       // 429 rate limit — transient, should be retried with backoff
       if (response.status === 429) {
         const retryAfterHeader = Number(response.headers.get('Retry-After') || '0');
@@ -229,11 +244,21 @@ export class OpenRouterClient {
 
     // Streaming path
     if (onToken && response.body) {
+      console.log(
+        '[OpenRouter] Response headers received: model=%s stream=true elapsedMs=%d',
+        model,
+        Date.now() - startTime,
+      );
       return this.readStream(response.body, model, startTime, onToken);
     }
 
     // Non-streaming fallback
     const headersReceivedMs = Date.now() - startTime;
+    console.log(
+      '[OpenRouter] Response headers received: model=%s stream=false elapsedMs=%d',
+      model,
+      headersReceivedMs,
+    );
     const data = await response.json();
     const choice = data.choices?.[0];
     if (!choice) throw new Error('No choices in OpenRouter response');
@@ -337,6 +362,16 @@ export class OpenRouterClient {
     const streamDurationMs = (ttftMs !== undefined && lastTokenMs !== undefined)
       ? lastTokenMs - startTime - ttftMs
       : undefined;
+
+    console.log(
+      '[OpenRouter] Stream complete: model=%s finishReason=%s elapsedMs=%d ttftMs=%s completionTokens=%s reasoningTokens=%s',
+      model,
+      finishReason,
+      Date.now() - startTime,
+      ttftMs ?? 'n/a',
+      completionTokens ?? 'n/a',
+      reasoningTokens ?? 'n/a',
+    );
 
     return {
       content: accumulated,
