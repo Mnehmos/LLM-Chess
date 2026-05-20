@@ -46,3 +46,6 @@ exports/
 .env
 .env.local
 !.env.example
+
+# Local debug frames extracted from MP4s for framing audits
+audit-frames/
