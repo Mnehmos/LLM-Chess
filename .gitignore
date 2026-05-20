@@ -41,3 +41,8 @@ exports/
 
 # TTS clip cache (content-hashed)
 .tts-cache/
+
+# Local secrets for the MP4 export pipeline (TTS keys, etc.)
+.env
+.env.local
+!.env.example
