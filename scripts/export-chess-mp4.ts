@@ -26,11 +26,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ffmpegStatic from 'ffmpeg-static';
 import { CHESS_EPISODES, DEFAULT_EPISODE_ID, getEpisode } from '../src/episodes';
+import type { EpisodeShortClip } from '../src/episodes/types';
 import {
   createRenderPlanFromPgn,
   retimeRenderPlanWithSegmentTimings,
   type RenderPlan,
 } from '../src/production/renderPlan';
+import { shortClipToRenderTarget, SHORTS_VIEWPORT } from '../src/production/clipManifest';
 import {
   cleanupFrames,
   launchBrowser,
@@ -49,6 +51,10 @@ interface CliFlags {
   previewDurationMs: number | null;
   keepFrames: boolean;
   outputRoot: string;
+  /** When set, capture only these specific authored shorts (and skip full). */
+  shortIds: string[];
+  /** When true, capture every authored short (and skip full). */
+  allShorts: boolean;
 }
 
 function parseFlags(argv: string[]): CliFlags {
@@ -59,6 +65,8 @@ function parseFlags(argv: string[]): CliFlags {
     previewDurationMs: null,
     keepFrames: false,
     outputRoot: 'exports',
+    shortIds: [],
+    allShorts: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -75,6 +83,14 @@ function parseFlags(argv: string[]): CliFlags {
       if (Number.isFinite(sec) && sec > 0) flags.previewDurationMs = Math.round(sec * 1000);
     } else if (arg === '--keep-frames') flags.keepFrames = true;
     else if (arg.startsWith('--output-root=')) flags.outputRoot = arg.slice('--output-root='.length);
+    else if (arg === '--all-shorts') flags.allShorts = true;
+    else if (arg === '--short' || arg === '--shorts') {
+      const value = argv[i + 1];
+      if (value) flags.shortIds.push(...value.split(',').map((s) => s.trim()).filter(Boolean));
+    } else if (arg.startsWith('--short=') || arg.startsWith('--shorts=')) {
+      const value = arg.slice(arg.indexOf('=') + 1);
+      if (value) flags.shortIds.push(...value.split(',').map((s) => s.trim()).filter(Boolean));
+    }
   }
   return flags;
 }
@@ -84,6 +100,8 @@ interface ResolvedInput {
   title: string;
   slug: string;
   episodeId?: string;
+  /** Authored shorts available for this input. Empty for raw-PGN inputs. */
+  authoredShorts: EpisodeShortClip[];
 }
 
 async function resolveInput(flags: CliFlags): Promise<ResolvedInput> {
@@ -95,6 +113,7 @@ async function resolveInput(flags: CliFlags): Promise<ResolvedInput> {
       pgnText,
       title: base,
       slug: base.toLowerCase().replace(/[^a-z0-9_-]+/g, '-'),
+      authoredShorts: [],
     };
   }
   const id = flags.episodeId ?? DEFAULT_EPISODE_ID;
@@ -116,6 +135,46 @@ async function resolveInput(flags: CliFlags): Promise<ResolvedInput> {
     title: episode.title,
     slug: episode.id,
     episodeId: episode.id,
+    authoredShorts: episode.exports?.shorts ?? [],
+  };
+}
+
+/**
+ * Filter the authored-shorts list according to CLI flags.
+ *
+ *   --all-shorts          → include every authored short, skip full
+ *   --short=<id1,id2>     → include only the named clips, skip full
+ *   (neither)             → no shorts captured; full only
+ *
+ * Returns `{ shorts, skipFull }`. Throws on unknown clip ids.
+ */
+function selectShorts(
+  flags: CliFlags,
+  authored: EpisodeShortClip[],
+): { shorts: EpisodeShortClip[]; skipFull: boolean } {
+  if (!flags.allShorts && flags.shortIds.length === 0) {
+    return { shorts: [], skipFull: false };
+  }
+  if (authored.length === 0) {
+    throw new Error(
+      '--short / --all-shorts was requested but the resolved input has no authored shorts.',
+    );
+  }
+  if (flags.allShorts) {
+    return { shorts: [...authored], skipFull: true };
+  }
+  const known = new Map(authored.map((s) => [s.id, s]));
+  const missing = flags.shortIds.filter((id) => !known.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `--short referenced unknown clip id(s): ${missing.join(', ')}. Available: ${[...known.keys()].join(
+        ', ',
+      )}`,
+    );
+  }
+  return {
+    shorts: flags.shortIds.map((id) => known.get(id) as EpisodeShortClip),
+    skipFull: true,
   };
 }
 
@@ -145,9 +204,11 @@ async function main(): Promise<void> {
     deviceScaleFactor: initialPlan.fullEpisode.viewport.deviceScaleFactor ?? 1,
   };
 
+  // Phase 4: select shorts based on CLI flags.
+  const { shorts: selectedShorts, skipFull } = selectShorts(flags, input.authoredShorts);
+
   // Working dirs.
   const outDir = path.resolve(repoRoot, flags.outputRoot, slug);
-  const frameDir = path.resolve(repoRoot, '.tmp', 'export-frames', `${slug}-${Date.now().toString(36)}`);
   await mkdir(outDir, { recursive: true });
 
   console.log(`[export] ${input.title}`);
@@ -156,39 +217,101 @@ async function main(): Promise<void> {
   );
   if (flags.fastMode) console.log('[export]   --fast (lower JPEG quality)');
   if (flags.previewDurationMs) console.log(`[export]   --preview=${flags.previewDurationMs / 1000} s`);
+  if (skipFull) console.log(`[export]   shorts mode: ${selectedShorts.map((s) => s.id).join(', ')}`);
+  else if (input.authoredShorts.length > 0) console.log(`[export]   ${input.authoredShorts.length} authored short(s) available (skipped; pass --all-shorts to include)`);
 
   let server: Awaited<ReturnType<typeof startViteServer>> | undefined;
   let browser: Awaited<ReturnType<typeof launchBrowser>> | undefined;
+  const frameDirs: string[] = [];
   try {
     server = await startViteServer(repoRoot, '127.0.0.1', 5173);
     console.log(`[export] vite ready at ${server.url}`);
     browser = await launchBrowser();
     console.log('[export] chromium launched');
 
-    const capture = await recordBroadcastPlayback(browser, {
-      serverUrl: server.url,
-      episodeId: input.episodeId,
-      rawPgn: input.episodeId ? undefined : input.pgnText,
-      frameDir,
-      viewport,
-      fastMode: flags.fastMode,
-      previewDurationMs: flags.previewDurationMs ?? undefined,
-    });
-
-    const retimedPlan = retimeRenderPlanWithSegmentTimings(initialPlan, capture.segmentTimings);
-    let outputPath = path.resolve(repoRoot, retimedPlan.fullEpisode.outputPath);
-    if (flags.previewDurationMs) {
-      outputPath = outputPath.replace(/\.mp4$/, '_preview.mp4');
+    // Targets array. The orchestrator captures them sequentially with
+    // a fresh browser context per target — parallel capture is a
+    // follow-up (Clio pattern); chess captures are short enough that
+    // serial is acceptable for Phase 4.
+    interface CaptureJob {
+      label: string;
+      shortId?: string;
+      viewport: { width: number; height: number; deviceScaleFactor?: number };
+      outputPath: string;
+    }
+    const jobs: CaptureJob[] = [];
+    if (!skipFull) {
+      let outputPath = path.resolve(repoRoot, initialPlan.fullEpisode.outputPath);
+      if (flags.previewDurationMs) outputPath = outputPath.replace(/\.mp4$/, '_preview.mp4');
+      jobs.push({ label: 'full', viewport, outputPath });
+    }
+    for (const clip of selectedShorts) {
+      const shortTarget = shortClipToRenderTarget({
+        clip,
+        episodeSlug: slug,
+        outputRoot: flags.outputRoot,
+        timing: initialPlan.timing,
+        fullTimeline: initialPlan.fullEpisode.timeline,
+      });
+      jobs.push({
+        label: `short:${clip.id}`,
+        shortId: clip.id,
+        viewport: {
+          width: SHORTS_VIEWPORT.width,
+          height: SHORTS_VIEWPORT.height,
+          deviceScaleFactor: SHORTS_VIEWPORT.deviceScaleFactor,
+        },
+        outputPath: path.resolve(repoRoot, shortTarget.outputPath),
+      });
     }
 
-    await composeMp4({
-      frameDir: capture.frameDir,
-      frameRate: capture.frameRate,
-      outputPath,
-      ffmpegPath,
-    });
+    const captures: Array<{ job: CaptureJob; segmentTimings: Record<number, number>; durationMs: number; frameCount: number }> = [];
+    for (const job of jobs) {
+      // Sanitize job.label for use as a Windows directory name —
+      // `short:opera_game_setup` breaks mkdir because `:` is reserved.
+      const safeLabel = job.label.replace(/[:/\\?*"<>|]/g, '_');
+      const frameDir = path.resolve(
+        repoRoot,
+        '.tmp',
+        'export-frames',
+        `${slug}-${safeLabel}-${Date.now().toString(36)}`,
+      );
+      frameDirs.push(frameDir);
+      console.log(`[export] capturing ${job.label} (${job.viewport.width}x${job.viewport.height})`);
+      const capture = await recordBroadcastPlayback(browser, {
+        serverUrl: server.url,
+        episodeId: input.episodeId,
+        rawPgn: input.episodeId ? undefined : input.pgnText,
+        shortId: job.shortId,
+        frameDir,
+        viewport: job.viewport,
+        fastMode: flags.fastMode,
+        previewDurationMs: flags.previewDurationMs ?? undefined,
+      });
 
-    // Sidecar manifests.
+      await composeMp4({
+        frameDir: capture.frameDir,
+        frameRate: capture.frameRate,
+        outputPath: job.outputPath,
+        ffmpegPath,
+      });
+      captures.push({
+        job,
+        segmentTimings: capture.segmentTimings,
+        durationMs: capture.durationMs,
+        frameCount: capture.frameCount,
+      });
+      console.log(`[export] wrote ${path.relative(repoRoot, job.outputPath)}`);
+    }
+
+    // Use the FULL capture's timings (if present) for retiming. Short
+    // captures only cover a slice of the game and would produce a
+    // partial offsets map.
+    const retimeSource = captures.find((c) => c.job.label === 'full');
+    const retimedPlan = retimeSource
+      ? retimeRenderPlanWithSegmentTimings(initialPlan, retimeSource.segmentTimings)
+      : initialPlan;
+
     await writeFile(
       path.join(outDir, 'render-plan.json'),
       `${JSON.stringify(retimedPlan, null, 2)}\n`,
@@ -202,16 +325,17 @@ async function main(): Promise<void> {
           title: input.title,
           episodeId: input.episodeId,
           createdAt,
-          outputPath: path.relative(repoRoot, outputPath),
           fastMode: flags.fastMode,
           previewDurationMs: flags.previewDurationMs,
-          capture: {
-            frameCount: capture.frameCount,
-            frameRate: capture.frameRate,
-            durationMs: capture.durationMs,
-            segmentTimingsCount: Object.keys(capture.segmentTimings).length,
-          },
-          consoleEntries: capture.consoleEntries.slice(-30),
+          captures: captures.map((c) => ({
+            label: c.job.label,
+            shortId: c.job.shortId,
+            outputPath: path.relative(repoRoot, c.job.outputPath),
+            viewport: c.job.viewport,
+            frameCount: c.frameCount,
+            durationMs: c.durationMs,
+            segmentTimingsCount: Object.keys(c.segmentTimings).length,
+          })),
         },
         null,
         2,
@@ -219,14 +343,13 @@ async function main(): Promise<void> {
       'utf8',
     );
 
-    console.log(`[export] wrote ${path.relative(repoRoot, outputPath)}`);
     console.log(`[export] wrote ${path.relative(repoRoot, path.join(outDir, 'render-plan.json'))}`);
     console.log(`[export] wrote ${path.relative(repoRoot, path.join(outDir, 'render-manifest.json'))}`);
   } finally {
     await Promise.allSettled([
       browser?.close(),
       server?.stop(),
-      cleanupFrames(frameDir, flags.keepFrames),
+      ...frameDirs.map((dir) => cleanupFrames(dir, flags.keepFrames)),
     ]);
   }
 }

@@ -247,10 +247,20 @@ export function createRenderPlanFromPgn(options: CreateRenderPlanOptions): Rende
   };
 }
 
-function estimateCommentaryDurationMs(text: string, timing: NarrationTiming): number {
+/**
+ * Planned commentary duration for a text block. Used by the initial
+ * plan builder and by clip-manifest slicing. Floors at textMinMs so
+ * empty / pre-generation slots still pace; caps at textMaxMs so a
+ * runaway commentary block doesn't dominate the timeline.
+ */
+export function estimateCommentaryDuration(text: string, timing: NarrationTiming): number {
   if (!text) return timing.textMinMs;
   const estimated = text.length * timing.textMsPerChar;
   return Math.min(timing.textMaxMs, Math.max(timing.textMinMs, estimated));
+}
+
+function estimateCommentaryDurationMs(text: string, timing: NarrationTiming): number {
+  return estimateCommentaryDuration(text, timing);
 }
 
 // ─── Retiming from measured offsets ─────────────────────────────────
