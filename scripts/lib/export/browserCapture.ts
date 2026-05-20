@@ -27,6 +27,12 @@ export interface CaptureOptions {
   episodeId?: string;
   /** Inline PGN passed as ?pgn=<encoded>. Mutually exclusive with episodeId. */
   rawPgn?: string;
+  /**
+   * Authored short clip id, passed as ?shortId=<id>. BroadcastView
+   * uses it to slice the replay to the short's ply range and
+   * markEnded once the short's last ply has been played.
+   */
+  shortId?: string;
   /** Output frame dir (absolute path). Will be created. */
   frameDir: string;
   /** Viewport for the capture. */
@@ -157,6 +163,7 @@ function buildUrl(options: CaptureOptions): string {
   url.searchParams.set('broadcast', '1');
   if (options.episodeId) url.searchParams.set('episode', options.episodeId);
   if (options.rawPgn) url.searchParams.set('pgn', options.rawPgn);
+  if (options.shortId) url.searchParams.set('shortId', options.shortId);
   url.searchParams.set('w', String(options.viewport.width));
   url.searchParams.set('h', String(options.viewport.height));
   return url.toString();
