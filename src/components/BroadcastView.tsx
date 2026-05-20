@@ -38,6 +38,11 @@ export function BroadcastView() {
   const [loadError] = useState<string | null>(() => resolvePgnSource(config).error);
   const [historicalContext] = useState<string | undefined>(() => resolvePgnSource(config).historicalContext);
   const [episodeCommentatorModel] = useState<string | null>(() => resolvePgnSource(config).commentatorModel);
+  // Phase 4: resolve a short's ply range when ?shortId= is set. null
+  // means "play the full game" (full-episode capture).
+  const [shortRange] = useState<{ startPly: number; endPly: number; clipId: string } | null>(
+    () => resolvePgnSource(config).shortRange,
+  );
 
   const startedRef = useRef(false);
   const commentatorAppliedRef = useRef(false);
@@ -108,7 +113,7 @@ export function BroadcastView() {
         startReplay(pgnText, {
           historicalContext,
           moveDelayMs: 0,
-          startFromPly: 0,
+          startFromPly: shortRange?.startPly ?? 0,
         });
       },
       reset: () => {
@@ -124,7 +129,7 @@ export function BroadcastView() {
         if (replayMode) stopReplay();
       },
     });
-  }, [pgnText, historicalContext, startReplay, stopReplay, replayMode]);
+  }, [pgnText, historicalContext, startReplay, stopReplay, replayMode, shortRange?.startPly]);
 
   useEffect(() => {
     exportBridge.__markReplayReady(Boolean(pgnText) && !loadError);
@@ -147,16 +152,24 @@ export function BroadcastView() {
     return () => cancelAnimationFrame(id);
   }, []);
 
-  // End flag: replay reaches a terminal status. GameStatus is a
-  // discriminated union — every value except 'created' and
-  // 'in_progress' is terminal.
+  // End flag: replay reaches a terminal status, OR a short capture's
+  // end ply has been replayed. GameStatus is a discriminated union —
+  // every value except 'created' and 'in_progress' is terminal.
   useEffect(() => {
     if (!activeGameState) return;
     const status = activeGameState.status;
     if (status !== 'created' && status !== 'in_progress') {
       exportBridge.__markEnded();
+      return;
     }
-  }, [activeGameState]);
+    if (shortRange && activeGameState.moveHistory.length >= shortRange.endPly + 1) {
+      // The replay store's stopReplay() flips the runtime out of
+      // replayMode; the activeGameState's status stays 'in_progress'
+      // momentarily so we set ended explicitly here.
+      exportBridge.__markEnded();
+      stopReplay();
+    }
+  }, [activeGameState, shortRange, stopReplay]);
 
   if (loadError) {
     return (
@@ -204,12 +217,14 @@ interface ResolvedPgnSource {
   error: string | null;
   historicalContext: string | undefined;
   commentatorModel: string | null;
+  /** When ?shortId= matches an authored clip, its ply range. Else null. */
+  shortRange: { startPly: number; endPly: number; clipId: string } | null;
 }
 
 /**
- * Resolve a BroadcastConfig to a PGN source, historical context, and
- * episode commentator model. Pure / synchronous so it can run inside
- * a useState initializer.
+ * Resolve a BroadcastConfig to a PGN source, historical context,
+ * commentator model, and (Phase 4) authored-short ply range. Pure /
+ * synchronous so it can run inside a useState initializer.
  */
 function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): ResolvedPgnSource {
   if (config.rawPgn) {
@@ -218,6 +233,7 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
       error: null,
       historicalContext: undefined,
       commentatorModel: null,
+      shortRange: null,
     };
   }
   const episodeId = config.episodeId ?? DEFAULT_EPISODE_ID;
@@ -227,6 +243,7 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
       error: 'No episode id supplied and no default episode is registered.',
       historicalContext: undefined,
       commentatorModel: null,
+      shortRange: null,
     };
   }
   const episode = getEpisode(episodeId);
@@ -236,6 +253,27 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
       error: `Unknown episode id "${episodeId}". Check src/episodes/registry.ts.`,
       historicalContext: undefined,
       commentatorModel: null,
+      shortRange: null,
+    };
+  }
+  let shortRange: ResolvedPgnSource['shortRange'] = null;
+  if (config.shortId) {
+    const clip = episode.exports?.shorts.find((s) => s.id === config.shortId);
+    if (!clip) {
+      return {
+        pgnText: episode.pgn,
+        error: `Unknown shortId "${config.shortId}" for episode "${episode.id}". Available: ${
+          episode.exports?.shorts.map((s) => s.id).join(', ') ?? '(none)'
+        }`,
+        historicalContext: episode.historicalContext,
+        commentatorModel: episode.commentator.model,
+        shortRange: null,
+      };
+    }
+    shortRange = {
+      startPly: Math.max(0, (clip.startMoveNumber - 1) * 2),
+      endPly: Math.max(0, clip.endMoveNumber * 2 - 1),
+      clipId: clip.id,
     };
   }
   return {
@@ -243,5 +281,6 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
     error: null,
     historicalContext: episode.historicalContext,
     commentatorModel: episode.commentator.model,
+    shortRange,
   };
 }
