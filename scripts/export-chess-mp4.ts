@@ -11,14 +11,19 @@
  *   npm run export:game -- --episode <id> --keep-frames
  *
  * TTS narration in the final MP4 (Phase 3.1):
- *   Set one of:
- *     CHESS_TTS_PROVIDER=openai    CHESS_OPENAI_API_KEY=sk-...     CHESS_TTS_VOICE=nova
- *     CHESS_TTS_PROVIDER=qwen-cloud CHESS_QWEN_API_KEY=...          CHESS_TTS_VOICE=Chelsie
- *     CHESS_TTS_PROVIDER=local                                      CHESS_TTS_PORT=9877
- *   Provider, key, and voice are forwarded into the SPA's localStorage
- *   before boot so the broadcast replay uses TTS and paces moves at
- *   narration speed. The capture also records the narration via
- *   MediaRecorder and ffmpeg-muxes it into the final MP4 as AAC.
+ *   Configure via a gitignored `.env` at the repo root, or via env
+ *   vars in your shell — env beats .env. See `.env.example` for the
+ *   full set of supported keys. Quick start with OpenAI:
+ *
+ *     CHESS_TTS_PROVIDER=openai
+ *     CHESS_OPENAI_API_KEY=sk-...
+ *     CHESS_TTS_VOICE=nova
+ *
+ *   The provider, key, and voice are forwarded into the SPA's
+ *   localStorage before boot, so the broadcast replay uses TTS and
+ *   paces moves at narration speed. The capture also records the
+ *   narration via MediaRecorder and ffmpeg-muxes it into the final
+ *   MP4 as AAC.
  *
  *   With no TTS env vars set, the MP4 is silent and the replay
  *   speedruns to checkmate in seconds.
@@ -30,6 +35,7 @@
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ffmpegStatic from 'ffmpeg-static';
@@ -54,9 +60,42 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..');
 
 /**
- * Resolve TTS config from environment variables. Returns null when
- * no TTS env var is set (capture produces a silent MP4 and speedruns
- * the replay since no narration gate is active).
+ * Load `.env` from the repo root into process.env. Idempotent — only
+ * keys not already set are written. Format is the standard
+ *   KEY=value
+ *   # comment
+ * dialect; values may be wrapped in single or double quotes (which
+ * are stripped). Lines without `=` are ignored. No new dependency:
+ * the file is small enough to parse by hand.
+ *
+ * .env is gitignored; .env.example is committed as a template.
+ */
+function loadDotEnv(filePath: string): void {
+  if (!existsSync(filePath)) return;
+  const raw = readFileSync(filePath, 'utf8');
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    // Strip surrounding single or double quotes; preserve inner content.
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    // Don't clobber an explicitly-set env var — env wins over .env.
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+// Load .env once at module init, before any code reads process.env.
+loadDotEnv(path.resolve(repoRoot, '.env'));
+
+/**
+ * Resolve TTS config from environment variables (or .env). Returns
+ * null when no TTS env var is set (capture produces a silent MP4
+ * and speedruns the replay since no narration gate is active).
  *
  *   CHESS_TTS_PROVIDER=openai|qwen-cloud|local
  *   CHESS_TTS_VOICE=<provider-specific>
@@ -84,6 +123,21 @@ function resolveTtsConfigFromEnv(): TtsExportConfig | null {
       `CHESS_TTS_PROVIDER=${provider} requires ${
         provider === 'openai' ? 'CHESS_OPENAI_API_KEY' : 'CHESS_QWEN_API_KEY'
       } to be set.`,
+    );
+  }
+  // Catch obvious placeholder values before they reach the SPA. The
+  // synthesize() call rejects bad keys silently from the capture's
+  // perspective (no audio is recorded, replay speedruns), which is
+  // the worst failure mode — fail loud instead.
+  if (provider === 'openai' && apiKey && !apiKey.startsWith('sk-')) {
+    throw new Error(
+      `CHESS_OPENAI_API_KEY does not start with "sk-" (got ${apiKey.length} chars). ` +
+        'Looks like you left the .env.example placeholder in place. Paste your real OpenAI key into .env.',
+    );
+  }
+  if (provider !== 'local' && apiKey && apiKey.length < 20) {
+    throw new Error(
+      `${provider === 'openai' ? 'CHESS_OPENAI_API_KEY' : 'CHESS_QWEN_API_KEY'} is only ${apiKey.length} chars long; that's not a real API key.`,
     );
   }
   const volume = process.env.CHESS_TTS_VOLUME ? Number(process.env.CHESS_TTS_VOLUME) : undefined;
