@@ -75,6 +75,18 @@ export class AudioNarrationQueue {
   /** Tracks which moveIndex we last fired onSegmentStart for. */
   private _lastFiredSegmentMoveIndex = -1;
 
+  /**
+   * MediaStreamAudioDestinationNode that mirrors the gain node so a
+   * MediaRecorder can capture everything the queue plays. Only created
+   * when startRecording() is called (broadcast / MP4-export mode); the
+   * normal SPA path never instantiates it.
+   */
+  private mediaStreamDest: MediaStreamAudioDestinationNode | null = null;
+  /** Active MediaRecorder during a broadcast capture. */
+  private mediaRecorder: MediaRecorder | null = null;
+  /** Accumulated audio chunks. Combined into a single Blob by stopRecording(). */
+  private recordedChunks: Blob[] = [];
+
   /** Number of commentary entries waiting or being played. */
   private _entryCount = 0;
 
@@ -93,6 +105,51 @@ export class AudioNarrationQueue {
       this.gainNode.connect(this.audioContext.destination);
     }
     return this.audioContext;
+  }
+
+  /**
+   * Start recording everything the queue plays from this point until
+   * stopRecording() is called. Used by broadcast / MP4-export mode to
+   * capture narration into the final MP4.
+   *
+   * Idempotent: if already recording, no-op. Creates the context lazily
+   * if needed (AudioContext is normally lazy-created on first synth).
+   */
+  startRecording(): void {
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') return;
+    const ctx = this.getContext();
+    if (!this.mediaStreamDest) {
+      this.mediaStreamDest = ctx.createMediaStreamDestination();
+      this.gainNode?.connect(this.mediaStreamDest);
+    }
+    this.recordedChunks = [];
+    // MediaRecorder default mimetype is webm/opus on Chromium — fine
+    // for ffmpeg to re-encode to AAC in the final MP4 mux.
+    this.mediaRecorder = new MediaRecorder(this.mediaStreamDest.stream);
+    this.mediaRecorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) this.recordedChunks.push(event.data);
+    };
+    // Pump chunks every 250 ms so a long capture doesn't sit on one
+    // monolithic Blob until stop().
+    this.mediaRecorder.start(250);
+  }
+
+  /**
+   * Stop the active recording and return the accumulated audio Blob.
+   * Resolves to null if recording was never started.
+   */
+  async stopRecording(): Promise<Blob | null> {
+    if (!this.mediaRecorder) return null;
+    const recorder = this.mediaRecorder;
+    if (recorder.state === 'inactive') return new Blob(this.recordedChunks);
+    return new Promise<Blob | null>((resolve) => {
+      recorder.onstop = () => {
+        const blob = new Blob(this.recordedChunks, { type: recorder.mimeType || 'audio/webm' });
+        this.mediaRecorder = null;
+        resolve(blob);
+      };
+      recorder.stop();
+    });
   }
 
   /**
@@ -320,8 +377,7 @@ export class AudioNarrationQueue {
     if (this.processingPromise || this.playing || this.paused || this.queue.length === 0) return;
     this.playing = true;
     const runGeneration = this.generation;
-    let runPromise: Promise<void>;
-    runPromise = this.processQueue(runGeneration).finally(() => {
+    const runPromise: Promise<void> = this.processQueue(runGeneration).finally(() => {
       if (this.processingPromise === runPromise) {
         this.processingPromise = null;
       }

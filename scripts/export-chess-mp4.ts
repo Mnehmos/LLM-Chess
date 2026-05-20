@@ -10,15 +10,23 @@
  *   npm run export:game -- --episode <id> --preview=30
  *   npm run export:game -- --episode <id> --keep-frames
  *
+ * TTS narration in the final MP4 (Phase 3.1):
+ *   Set one of:
+ *     CHESS_TTS_PROVIDER=openai    CHESS_OPENAI_API_KEY=sk-...     CHESS_TTS_VOICE=nova
+ *     CHESS_TTS_PROVIDER=qwen-cloud CHESS_QWEN_API_KEY=...          CHESS_TTS_VOICE=Chelsie
+ *     CHESS_TTS_PROVIDER=local                                      CHESS_TTS_PORT=9877
+ *   Provider, key, and voice are forwarded into the SPA's localStorage
+ *   before boot so the broadcast replay uses TTS and paces moves at
+ *   narration speed. The capture also records the narration via
+ *   MediaRecorder and ffmpeg-muxes it into the final MP4 as AAC.
+ *
+ *   With no TTS env vars set, the MP4 is silent and the replay
+ *   speedruns to checkmate in seconds.
+ *
  * Output:
  *   exports/<slug>/<slug>.mp4
  *   exports/<slug>/render-plan.json      (retimed with measured offsets)
  *   exports/<slug>/render-manifest.json  (frame count, durations, console errors)
- *
- * Phase 3 produces a SILENT mp4. Audio mux lands as a Phase 3.1
- * follow-up — the SPA plays TTS live during capture, but CDP
- * screencast does not capture audio. The render-plan.json + segment
- * timings preserve everything the audio composition step needs.
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -37,12 +45,57 @@ import {
   cleanupFrames,
   launchBrowser,
   recordBroadcastPlayback,
+  type TtsExportConfig,
 } from './lib/export/browserCapture';
 import { startViteServer } from './lib/export/devServer';
 import { composeMp4 } from './lib/export/ffmpegCompose';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..');
+
+/**
+ * Resolve TTS config from environment variables. Returns null when
+ * no TTS env var is set (capture produces a silent MP4 and speedruns
+ * the replay since no narration gate is active).
+ *
+ *   CHESS_TTS_PROVIDER=openai|qwen-cloud|local
+ *   CHESS_TTS_VOICE=<provider-specific>
+ *   CHESS_TTS_VOLUME=0..1
+ *   CHESS_OPENAI_API_KEY=sk-...
+ *   CHESS_QWEN_API_KEY=...
+ *   CHESS_TTS_PORT=9877       (local provider only)
+ */
+function resolveTtsConfigFromEnv(): TtsExportConfig | null {
+  const provider = process.env.CHESS_TTS_PROVIDER as TtsExportConfig['provider'] | undefined;
+  if (!provider) return null;
+  if (provider !== 'openai' && provider !== 'qwen-cloud' && provider !== 'local') {
+    throw new Error(
+      `CHESS_TTS_PROVIDER must be one of: openai, qwen-cloud, local (got: "${provider}")`,
+    );
+  }
+  const apiKey =
+    provider === 'openai'
+      ? process.env.CHESS_OPENAI_API_KEY
+      : provider === 'qwen-cloud'
+        ? process.env.CHESS_QWEN_API_KEY
+        : undefined;
+  if (provider !== 'local' && !apiKey) {
+    throw new Error(
+      `CHESS_TTS_PROVIDER=${provider} requires ${
+        provider === 'openai' ? 'CHESS_OPENAI_API_KEY' : 'CHESS_QWEN_API_KEY'
+      } to be set.`,
+    );
+  }
+  const volume = process.env.CHESS_TTS_VOLUME ? Number(process.env.CHESS_TTS_VOLUME) : undefined;
+  const port = process.env.CHESS_TTS_PORT ? Number(process.env.CHESS_TTS_PORT) : undefined;
+  return {
+    provider,
+    apiKey,
+    voice: process.env.CHESS_TTS_VOICE,
+    volume: volume && Number.isFinite(volume) ? volume : undefined,
+    port: port && Number.isFinite(port) ? port : undefined,
+  };
+}
 
 interface CliFlags {
   pgnPath: string | null;
@@ -220,6 +273,21 @@ async function main(): Promise<void> {
   if (skipFull) console.log(`[export]   shorts mode: ${selectedShorts.map((s) => s.id).join(', ')}`);
   else if (input.authoredShorts.length > 0) console.log(`[export]   ${input.authoredShorts.length} authored short(s) available (skipped; pass --all-shorts to include)`);
 
+  // Phase 3.1: resolve TTS config from env. Without TTS the capture
+  // produces a silent MP4 and the replay speedruns (no narration gate
+  // to pace move advancement). With TTS, narration is recorded via
+  // MediaRecorder in the SPA and muxed into the MP4 here.
+  const ttsConfig = resolveTtsConfigFromEnv();
+  if (ttsConfig) {
+    console.log(
+      `[export]   TTS: ${ttsConfig.provider}${ttsConfig.voice ? ` voice=${ttsConfig.voice}` : ''}`,
+    );
+  } else {
+    console.log(
+      '[export]   TTS: disabled (set CHESS_TTS_PROVIDER + key to enable; otherwise replay speedruns and MP4 is silent)',
+    );
+  }
+
   let server: Awaited<ReturnType<typeof startViteServer>> | undefined;
   let browser: Awaited<ReturnType<typeof launchBrowser>> | undefined;
   const frameDirs: string[] = [];
@@ -265,7 +333,13 @@ async function main(): Promise<void> {
       });
     }
 
-    const captures: Array<{ job: CaptureJob; segmentTimings: Record<number, number>; durationMs: number; frameCount: number }> = [];
+    const captures: Array<{
+      job: CaptureJob;
+      segmentTimings: Record<number, number>;
+      durationMs: number;
+      frameCount: number;
+      audioBytes: number;
+    }> = [];
     for (const job of jobs) {
       // Sanitize job.label for use as a Windows directory name —
       // `short:opera_game_setup` breaks mkdir because `:` is reserved.
@@ -287,19 +361,34 @@ async function main(): Promise<void> {
         viewport: job.viewport,
         fastMode: flags.fastMode,
         previewDurationMs: flags.previewDurationMs ?? undefined,
+        ttsConfig: ttsConfig ?? undefined,
       });
+
+      // Write recorded narration audio to the per-job frame dir so it's
+      // cleaned up alongside the frames. ffmpeg reads it as a second
+      // input and re-encodes to AAC. Skip when nothing was recorded.
+      let audioPath: string | undefined;
+      let audioBytes = 0;
+      if (capture.recordedAudioBase64) {
+        const audioBuffer = Buffer.from(capture.recordedAudioBase64, 'base64');
+        audioBytes = audioBuffer.length;
+        audioPath = path.join(frameDir, 'narration.webm');
+        await writeFile(audioPath, audioBuffer);
+      }
 
       await composeMp4({
         frameDir: capture.frameDir,
         frameRate: capture.frameRate,
         outputPath: job.outputPath,
         ffmpegPath,
+        audioPath,
       });
       captures.push({
         job,
         segmentTimings: capture.segmentTimings,
         durationMs: capture.durationMs,
         frameCount: capture.frameCount,
+        audioBytes,
       });
       console.log(`[export] wrote ${path.relative(repoRoot, job.outputPath)}`);
     }
@@ -327,6 +416,7 @@ async function main(): Promise<void> {
           createdAt,
           fastMode: flags.fastMode,
           previewDurationMs: flags.previewDurationMs,
+          ttsProvider: ttsConfig?.provider ?? null,
           captures: captures.map((c) => ({
             label: c.job.label,
             shortId: c.job.shortId,
@@ -335,6 +425,7 @@ async function main(): Promise<void> {
             frameCount: c.frameCount,
             durationMs: c.durationMs,
             segmentTimingsCount: Object.keys(c.segmentTimings).length,
+            audioBytes: c.audioBytes,
           })),
         },
         null,

@@ -49,6 +49,25 @@ export interface CaptureOptions {
    * Defaults to plannedDurationMs * 1.5 + 5 minutes if not set.
    */
   endTimeoutMs?: number;
+  /**
+   * Optional TTS config to seed into the SPA's localStorage before
+   * the page boots. When set, the SPA's broadcast mode uses TTS and
+   * narration paces the replay; recorded narration is muxed into the
+   * MP4 via AudioNarrationQueue's MediaRecorder tap.
+   */
+  ttsConfig?: TtsExportConfig;
+}
+
+export interface TtsExportConfig {
+  provider: 'openai' | 'qwen-cloud' | 'local';
+  /** Required for cloud providers; ignored for local. */
+  apiKey?: string;
+  /** Provider-specific voice id (e.g. 'nova' for OpenAI, 'Chelsie' for Qwen). */
+  voice?: string;
+  /** Volume 0..1. Default 0.8. */
+  volume?: number;
+  /** Local sidecar port. Default 9877. Only used when provider === 'local'. */
+  port?: number;
 }
 
 export interface CaptureResult {
@@ -61,6 +80,12 @@ export interface CaptureResult {
   segmentTimings: Record<number, number>;
   /** Browser console errors / warnings collected during the run. */
   consoleEntries: BrowserConsoleEntry[];
+  /**
+   * Base64-encoded webm/opus narration audio recorded via MediaRecorder
+   * tap on the AudioNarrationQueue. Empty string when TTS was disabled
+   * or no narration played.
+   */
+  recordedAudioBase64: string;
 }
 
 export interface BrowserConsoleEntry {
@@ -76,6 +101,16 @@ export async function recordBroadcastPlayback(browser: Browser, options: Capture
     colorScheme: 'dark',
     reducedMotion: 'no-preference',
   });
+  // Seed TTS settings into localStorage BEFORE any SPA module loads
+  // so zustand's persist middleware picks them up on boot. The page
+  // is started fresh by Playwright, so localStorage is empty — without
+  // this seeding, ttsEnabled defaults to false and the replay
+  // speedruns to checkmate in milliseconds (no narration gate to
+  // pace it).
+  if (options.ttsConfig) {
+    await context.addInitScript(seedTtsSettingsScript(options.ttsConfig));
+  }
+
   const page = await context.newPage();
   const consoleEntries: BrowserConsoleEntry[] = [];
   page.on('console', (message) => {
@@ -127,16 +162,31 @@ export async function recordBroadcastPlayback(browser: Browser, options: Capture
     const durationMs = Math.max(1000, endedAtMs - startedAtMs);
     const frameCount = await frameWriter.finalize(durationMs);
 
-    // Read segment timings + render plan diagnostic back out.
-    const segmentTimings =
-      (await page
-        .evaluate(() => window.__CHESS_EXPORT__?.state().segmentTimings ?? {})
-        .catch(() => ({}))) ?? {};
+    // Read segment timings + recorded audio back out. The bridge
+    // populates segmentTimings as commentary plays, and stores the
+    // base64-encoded webm audio after BroadcastView's end-of-replay
+    // effect calls finalizeRecording().
+    const bridgeReadback = (await page
+      .evaluate(() => {
+        const s = window.__CHESS_EXPORT__?.state();
+        return {
+          segmentTimings: s?.segmentTimings ?? {},
+          recordedAudio: s?.recordedAudio ?? '',
+        };
+      })
+      .catch(() => ({ segmentTimings: {}, recordedAudio: '' }))) ?? {
+      segmentTimings: {},
+      recordedAudio: '',
+    };
+    const segmentTimings = bridgeReadback.segmentTimings;
+    const recordedAudioBase64 = bridgeReadback.recordedAudio;
 
     console.log(
       `[capture] captured ${frameCount} frames in ${(durationMs / 1000).toFixed(1)} s, ${
         Object.keys(segmentTimings).length
-      } segment timings`,
+      } segment timings, ${
+        recordedAudioBase64 ? `${Math.round((recordedAudioBase64.length * 3) / 4 / 1024)} KB audio` : 'no audio'
+      }`,
     );
     if (Object.keys(segmentTimings).length === 0) {
       console.warn(
@@ -151,10 +201,68 @@ export async function recordBroadcastPlayback(browser: Browser, options: Capture
       durationMs,
       segmentTimings,
       consoleEntries,
+      recordedAudioBase64,
     };
   } finally {
     await context.close().catch(() => undefined);
   }
+}
+
+/**
+ * Serialize a TTS export config into a stringified init script that
+ * pre-seeds the SPA's zustand persist record before any module loads.
+ *
+ * Zustand persist stores state under `<persist.name>` (here:
+ * `llm-chess-settings`) as a JSON envelope `{ state: {...}, version }`.
+ * We only need to set the TTS-specific fields and an `ttsEnabled: true`
+ * flag; the rest of the settings fall back to their schema defaults
+ * via the migrate function on first hydrate.
+ */
+function seedTtsSettingsScript(tts: TtsExportConfig): string {
+  const payload = {
+    state: {
+      ttsEnabled: true,
+      ttsProvider: tts.provider,
+      ttsCloudApiKey: tts.apiKey ?? '',
+      ttsCloudVoice: tts.voice ?? (tts.provider === 'openai' ? 'nova' : 'Chelsie'),
+      ttsVoice: tts.voice ?? 'default',
+      ttsVolume: tts.volume ?? 0.8,
+      ttsPort: tts.port ?? 9877,
+    },
+    version: 8,
+  };
+  // The init script runs in the page's main world before any module
+  // executes. It merges into any existing persisted state so other
+  // settings (provider key, model preferences) survive across calls
+  // — though in headless Chromium with a fresh profile there's
+  // nothing to merge.
+  return `
+    (function () {
+      try {
+        const KEY = 'llm-chess-settings';
+        const incoming = ${JSON.stringify(payload)};
+        const raw = localStorage.getItem(KEY);
+        if (raw) {
+          try {
+            const existing = JSON.parse(raw);
+            const merged = {
+              state: { ...(existing.state || {}), ...incoming.state },
+              version: incoming.version,
+            };
+            localStorage.setItem(KEY, JSON.stringify(merged));
+          } catch (_e) {
+            localStorage.setItem(KEY, JSON.stringify(incoming));
+          }
+        } else {
+          localStorage.setItem(KEY, JSON.stringify(incoming));
+        }
+      } catch (_e) {
+        // localStorage may be unavailable (private mode, etc.); the
+        // SPA falls back to its schema defaults (TTS off) and the
+        // capture pipeline will warn about no audio.
+      }
+    })();
+  `;
 }
 
 function buildUrl(options: CaptureOptions): string {
@@ -251,6 +359,7 @@ declare global {
         ended: boolean;
         segmentTimings: Record<number, number>;
         renderPlan?: unknown;
+        recordedAudio: string;
       };
     };
   }
