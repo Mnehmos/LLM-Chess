@@ -5,6 +5,7 @@ import { getBroadcastConfig } from '../app/broadcastConfig';
 import { exportBridge } from '../app/exportBridge';
 import { getEpisode, DEFAULT_EPISODE_ID } from '../episodes';
 import { TournamentProgress } from './TournamentProgress';
+import { BroadcastLayout } from './BroadcastLayout';
 import { getActiveAudioNarrationQueue } from '../tts/audio-queue';
 import { createRenderPlanFromPgn, type RenderPlan } from '../production/renderPlan';
 
@@ -30,6 +31,10 @@ export function BroadcastView() {
   const replayMode = useTournamentStore(s => s.replayMode);
   const setReplayCommentatorModel = useTournamentStore(s => s.setReplayCommentatorModel);
   const ttsEnabled = useSettingsStore(s => s.ttsEnabled);
+  // Subscribed via hook so changes trigger BroadcastLayout re-renders.
+  const streamingText = useTournamentStore(s => s.streamingText);
+  const stockfishEval = useTournamentStore(s => s.stockfishEval);
+  const commentaryLog = useTournamentStore(s => s.commentaryLog);
 
   // PGN source resolution. Broadcast config comes from URL params and
   // never changes during a page lifetime, so we resolve once with a
@@ -217,11 +222,92 @@ export function BroadcastView() {
     );
   }
 
+  // Compose two layers:
+  //
+  //   1. TournamentProgress rendered OFF-SCREEN so all of its existing
+  //      wiring (CommentaryQueue setup, registerNarrationGate, the
+  //      AudioNarrationQueue creation in CommentaryPanel) keeps running.
+  //      Reusing it avoids replicating ~1000 lines of orchestration.
+  //
+  //   2. BroadcastLayout rendered ON-SCREEN as the captured frame. It
+  //      reads the same tournament store, so it sees every move and
+  //      commentary entry, but with a layout designed for video framing
+  //      (board fills the frame, no dead space, no interactive controls).
+  //
+  // The off-screen TournamentProgress is moved to fixed `top: -10000px`
+  // so it does not intercept paint nor inflate the captured viewport.
+  const lastMove = computeLastMove(activeGameState);
+  const commentaryEntries = computeCommentaryEntries(activeGameState, commentaryLog);
+  const episode = config.episodeId ? getEpisode(config.episodeId) : undefined;
   return (
-    <div className="min-h-screen bg-surface-0 p-3">
-      <TournamentProgress />
-    </div>
+    <>
+      <div style={{ position: 'fixed', top: -10000, left: 0, width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' }} aria-hidden>
+        <TournamentProgress />
+      </div>
+      <BroadcastLayout
+        gameState={activeGameState ?? emptyGameStatePlaceholder()}
+        liveCommentaryText={streamingText || ''}
+        commentaryEntries={commentaryEntries}
+        stockfishEval={stockfishEval}
+        title={episode?.title ?? 'Chess Game'}
+        subtitle={episode?.summary?.split('.')[0]}
+        orientation={
+          (config.viewportHeight ?? 1080) > (config.viewportWidth ?? 1920) ? 'short' : 'full'
+        }
+        lastMove={lastMove}
+      />
+    </>
   );
+}
+
+function computeLastMove(gameState: import('../engine/types').GameState | null): { from: string; to: string } | undefined {
+  if (!gameState) return undefined;
+  for (let i = gameState.eventLog.length - 1; i >= 0; i--) {
+    const evt = gameState.eventLog[i];
+    if (evt.type === 'MoveApplied') return { from: evt.payload.from, to: evt.payload.to };
+  }
+  return undefined;
+}
+
+function computeCommentaryEntries(
+  gameState: import('../engine/types').GameState | null,
+  commentaryLog: Record<number, string>,
+): import('../commentary/commentaryQueue').CommentaryEntry[] {
+  if (!gameState) return [];
+  const entries: import('../commentary/commentaryQueue').CommentaryEntry[] = [];
+  for (const [moveIndexRaw, text] of Object.entries(commentaryLog)) {
+    const moveIndex = Number(moveIndexRaw);
+    const move = gameState.moveHistory[moveIndex];
+    entries.push({
+      id: `bc-${moveIndex}`,
+      moves: move ? [{ moveNumber: move.turnNumber, move: move.move, color: move.color }] : [],
+      text,
+      streaming: false,
+      timestamp: 0,
+      maxMoveIndex: moveIndex,
+    });
+  }
+  entries.sort((a, b) => (a.maxMoveIndex ?? 0) - (b.maxMoveIndex ?? 0));
+  return entries;
+}
+
+function emptyGameStatePlaceholder(): import('../engine/types').GameState {
+  // BroadcastLayout requires a GameState even before the replay starts;
+  // the activeGameState is briefly null between bridge.start() and the
+  // first runtime event. This placeholder shows the starting position
+  // with empty player names so the frame isn't blank.
+  return {
+    gameId: 'broadcast:waiting',
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    moveHistory: [],
+    currentTurn: 1,
+    currentColor: 'w',
+    startedAt: Date.now(),
+    eventLog: [],
+    status: 'created',
+    white: { id: '', color: 'w', model: '', displayName: 'White', temperature: 0, promptLevel: 'p1', outputFormat: 'A', maxRetries: 0 },
+    black: { id: '', color: 'b', model: '', displayName: 'Black', temperature: 0, promptLevel: 'p1', outputFormat: 'A', maxRetries: 0 },
+  } as unknown as import('../engine/types').GameState;
 }
 
 interface ResolvedPgnSource {
