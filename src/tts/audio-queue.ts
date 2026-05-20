@@ -21,10 +21,24 @@ interface QueueEntry {
   entryId?: string;
   maxMoveIndex?: number;
   moves?: NarrationMove[];
+  /**
+   * True when this sentence opens a new commentary entry (i.e. the
+   * board should advance and a render-plan paint offset should be
+   * recorded). Set by enqueueEntry for the first sentence only.
+   */
+  isEntryHead?: boolean;
 }
 
 export type SentenceStartCallback = (text: string, squares: string[], annotations: BoardAnnotations) => void;
 export type EntryStartCallback = (maxMoveIndex: number, moves: NarrationMove[], entryId: string) => void;
+/**
+ * Fires when the first sentence of a commentary entry begins playing.
+ * Receives the move index this entry covers and the offset from
+ * markPlaybackStart() in ms. Used only in broadcast / MP4-export mode.
+ * The export pipeline maps moveIndex → render-plan segment index when
+ * composing audio.
+ */
+export type SegmentStartCallback = (maxMoveIndex: number, offsetMs: number) => void;
 
 /**
  * Sequential audio narration queue with per-sentence board sync.
@@ -48,8 +62,18 @@ export class AudioNarrationQueue {
   private prefetchPromise: Promise<ArrayBuffer> | null = null;
   private onSentenceStart: SentenceStartCallback | null = null;
   private onEntryStart: EntryStartCallback | null = null;
+  private onSegmentStart: SegmentStartCallback | null = null;
   /** Tracks which entryId we last fired onEntryStart for. */
   private _lastFiredEntryId: string | null = null;
+  /**
+   * performance.now() at which __CHESS_EXPORT__.start() was called.
+   * Used to compute per-segment paint offsets in broadcast / MP4-export
+   * mode. Zero when not in broadcast mode (and onSegmentStart never
+   * fires).
+   */
+  private playbackStartMs = 0;
+  /** Tracks which moveIndex we last fired onSegmentStart for. */
+  private _lastFiredSegmentMoveIndex = -1;
 
   /** Number of commentary entries waiting or being played. */
   private _entryCount = 0;
@@ -88,6 +112,33 @@ export class AudioNarrationQueue {
   }
 
   /**
+   * Set callback fired when a sentence belonging to a known render-plan
+   * segment begins audio playback. Receives the segment index and the
+   * offset from markPlaybackStart() in ms.
+   *
+   * Used only in broadcast / MP4-export mode (Phase 2). The capture
+   * pipeline reads these offsets back through __CHESS_EXPORT__.state()
+   * and re-times the render plan so composed narration audio sits at
+   * the exact paint moment.
+   */
+  setSegmentStartCallback(cb: SegmentStartCallback | null): void {
+    this.onSegmentStart = cb;
+  }
+
+  /**
+   * Mark the moment __CHESS_EXPORT__.start() was called. All subsequent
+   * onSegmentStart offsets are measured from this point.
+   *
+   * No-op outside broadcast mode. Calling again with 0 disables segment
+   * timing emission for the rest of the queue's lifetime (used by the
+   * reset path).
+   */
+  markPlaybackStart(performanceNow: number): void {
+    this.playbackStartMs = performanceNow;
+    this._lastFiredSegmentMoveIndex = -1;
+  }
+
+  /**
    * Enqueue a full commentary entry with board-sync metadata.
    * Board advances only when this entry's first sentence starts playing.
    */
@@ -100,6 +151,7 @@ export class AudioNarrationQueue {
     const cleanText = stripMarkdownForTts(text);
     const sentences = splitIntoSentences(cleanText);
     this._entryCount++;
+    let firstSentenceOfEntry = true;
     for (const sentence of sentences) {
       const trimmed = sentence.trim();
       if (trimmed) {
@@ -116,7 +168,12 @@ export class AudioNarrationQueue {
           entryId: options.entryId,
           maxMoveIndex: options.maxMoveIndex,
           moves: options.moves,
+          // Only the first sentence of an entry is treated as the
+          // "head" — that's where the board advances and where the
+          // export pipeline records the segment paint offset.
+          isEntryHead: firstSentenceOfEntry,
         });
+        firstSentenceOfEntry = false;
       }
     }
     this.ensureProcessing();
@@ -318,6 +375,23 @@ export class AudioNarrationQueue {
         // Fire sentence start callback right before playback
         this.onSentenceStart?.(entry.text, entry.squares, entry.annotations);
 
+        // Fire segment-start callback when this sentence opens a new
+        // commentary entry AND we're in broadcast mode (markPlaybackStart
+        // has been called with a non-zero performance.now). Recorded
+        // once per moveIndex; the commentary entry's first sentence wins.
+        if (
+          entry.isEntryHead
+          && entry.maxMoveIndex !== undefined
+          && this.playbackStartMs > 0
+          && entry.maxMoveIndex !== this._lastFiredSegmentMoveIndex
+        ) {
+          this._lastFiredSegmentMoveIndex = entry.maxMoveIndex;
+          this.onSegmentStart?.(
+            entry.maxMoveIndex,
+            performance.now() - this.playbackStartMs,
+          );
+        }
+
         // Play the audio
         await this.playAudioBuffer(audioData, runGeneration);
       } catch (err) {
@@ -392,6 +466,31 @@ function stripMarkdownForTts(text: string): string {
     .replace(/\n{2,}/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim();
+}
+
+// ─── Active-queue registry (broadcast mode) ─────────────────────────
+//
+// CommentaryPanel creates an AudioNarrationQueue per session. The
+// MP4-export pipeline (BroadcastView in Phase 1, scripts/lib/export in
+// Phase 3) needs to reach the currently-active queue to call
+// markPlaybackStart() and setSegmentStartCallback(). Following the
+// existing registerCommentaryQueue pattern in tournamentStore, expose
+// a module-level slot. Outside broadcast mode this slot is set but
+// nobody reads it.
+
+let activeAudioNarrationQueue: AudioNarrationQueue | null = null;
+
+/**
+ * Register the audio narration queue currently driving playback. Called
+ * by CommentaryPanel on mount. Unregister with null on unmount.
+ */
+export function registerAudioNarrationQueue(queue: AudioNarrationQueue | null): void {
+  activeAudioNarrationQueue = queue;
+}
+
+/** Returns the active audio narration queue, if any. */
+export function getActiveAudioNarrationQueue(): AudioNarrationQueue | null {
+  return activeAudioNarrationQueue;
 }
 
 /**

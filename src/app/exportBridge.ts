@@ -29,10 +29,24 @@ export interface ExportBridgeState {
   /** GameEnded / GameAborted has fired. */
   ended: boolean;
   /**
-   * Map of timeline-segment-index to milliseconds-since-start(),
-   * populated by AudioNarrationQueue in Phase 2. Empty in Phase 1.
+   * Map of {moveIndex → offsetMs from start()}. Populated by
+   * AudioNarrationQueue when each commentary entry's first sentence
+   * begins playing. Phase 3 uses this to retime the render plan so
+   * composed audio sits at the exact paint moment.
+   *
+   * Keyed by 0-indexed ply (matching AudioNarrationQueue's
+   * maxMoveIndex). The Phase 3 export pipeline calls
+   * retimeRenderPlanWithSegmentTimings(plan, segmentTimings) to map
+   * these back onto plan timeline indices.
    */
   segmentTimings: Record<number, number>;
+  /**
+   * Render plan attached by BroadcastView when start() is called.
+   * Useful for diagnostics; the capture pipeline already has the plan
+   * it built before opening the page, so this field is informational.
+   * Optional to keep the contract backward-compatible with Phase 1.
+   */
+  renderPlan?: unknown;
 }
 
 /**
@@ -59,8 +73,13 @@ export interface ExportBridge {
   __markAudioReady(ready: boolean): void;
   /** Internal: GameEnded / GameAborted fired. */
   __markEnded(): void;
-  /** Internal: AudioNarrationQueue records per-segment paint offset. */
-  __recordSegmentTiming(segmentIndex: number, offsetMs: number): void;
+  /**
+   * Internal: AudioNarrationQueue records per-move paint offset (the
+   * moment commentary for that move began playing).
+   */
+  __recordSegmentTiming(moveIndex: number, offsetMs: number): void;
+  /** Internal: BroadcastView attaches the render plan when start() runs. */
+  __setRenderPlan(plan: unknown): void;
   /** Internal: installExportBridge sets broadcastMode at boot. */
   __setBroadcastMode(value: boolean): void;
 }
@@ -114,8 +133,11 @@ export const exportBridge: ExportBridge = {
   __markEnded() {
     state.ended = true;
   },
-  __recordSegmentTiming(segmentIndex, offsetMs) {
-    state.segmentTimings[segmentIndex] = offsetMs;
+  __recordSegmentTiming(moveIndex, offsetMs) {
+    state.segmentTimings[moveIndex] = offsetMs;
+  },
+  __setRenderPlan(plan) {
+    state.renderPlan = plan;
   },
   __setBroadcastMode(value) {
     state.broadcastMode = value;
