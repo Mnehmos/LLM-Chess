@@ -1,4 +1,5 @@
 import { OPERA_GAME_EPISODE } from './opera_game_morphy_1858';
+import { ITALIAN_GAME_LESSON_EPISODE } from './italian_game_lesson';
 import type { Episode, EpisodeSource } from './types';
 
 /**
@@ -9,6 +10,7 @@ import type { Episode, EpisodeSource } from './types';
  */
 export const CHESS_EPISODES: Episode[] = [
   OPERA_GAME_EPISODE,
+  ITALIAN_GAME_LESSON_EPISODE,
 ];
 
 /** Default episode id when no `?episode=` is specified. */

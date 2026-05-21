@@ -492,6 +492,36 @@ function getCommentatorSystemPrompt(ttsMode?: boolean, verbosity?: string): stri
 }
 
 /**
+ * Build a commentary system prompt for a chess LESSON.
+ *
+ * Differs from the historical prompt in framing: instead of a retrospective
+ * narrator who knows the result, the LLM is positioned as a TEACHER
+ * walking through an opening / technique / pattern in first person.
+ * Each move is treated as a teaching beat — "I'm playing X because Y,
+ * the idea is Z, common student mistake is W." The lesson context
+ * carries the topic and the teacher persona.
+ *
+ * The PGN being played is still pre-determined (this is replay-mode
+ * lesson playback), but the prompt frames it as if the AI is choosing
+ * each move live as part of the lesson.
+ */
+export function getLessonCommentatorPrompt(lessonContext: string, ttsMode?: boolean, verbosity?: string): string {
+  const lessonPreamble = `You are an AI chess teacher giving a LESSON to a student audience. You are PLAYING the game while you explain — each move on the board is YOUR move (or, when it's the opponent's turn, you analyze what they played and why).
+
+LESSON CONTEXT:
+${lessonContext}
+
+Voice: first person, teacher to student. "I'm playing e4 because...", "Now I would expect Black to...", "The reason this move is so important is...".
+Do NOT reference "the game", "the players", or "the result" — there is no historical match here, this is a live demonstration.
+Focus on the IDEA behind each move, the pattern being taught, and the kinds of mistakes a learning player would make in similar positions.
+When the opponent plays, briefly explain what they did and how it affects your plan.
+
+`;
+  const verbDir = verbosity ? (VERBOSITY_DIRECTIVES[verbosity] || '') : '';
+  return lessonPreamble + COMMENTATOR_SYSTEM_PROMPT_BASE + (ttsMode ? COMMENTATOR_STYLE_TTS : COMMENTATOR_STYLE_RICH) + verbDir;
+}
+
+/**
  * Build a commentary system prompt for historical game replay.
  * Prepends historical context to the standard commentator prompt so the LLM
  * can foreshadow, build dramatic tension, and reference the game's significance.

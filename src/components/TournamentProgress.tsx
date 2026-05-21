@@ -11,7 +11,7 @@ import { downloadSingleGamePGN } from '../utils/export';
 import { downloadSingleGameJSON } from '../utils/export';
 import { CommentaryQueue, type CommentaryEntry } from '../commentary/commentaryQueue';
 import { createLLMClient } from '../llm/client';
-import { getHistoricalCommentatorPrompt, buildPuzzleBreakIntroPrompt, buildPuzzleSetupPromptWithOracle, buildPuzzleCommentaryTurnPromptWithOracle, buildPuzzleOutroPromptWithOracle } from '../llm/prompts';
+import { getHistoricalCommentatorPrompt, getLessonCommentatorPrompt, buildPuzzleBreakIntroPrompt, buildPuzzleSetupPromptWithOracle, buildPuzzleCommentaryTurnPromptWithOracle, buildPuzzleOutroPromptWithOracle } from '../llm/prompts';
 import { runResilientTextGeneration } from '../llm/resilient-text';
 import { fetchLichessPuzzle, getPuzzleFamilyId, prefillPuzzlePool, type LichessPuzzle, type PuzzleTurn } from '../commentary/puzzleBreak';
 import { parseAnnotations, EMPTY_ANNOTATIONS, parsePuzzleMoves, hasAnnotations, mergeAnnotations, type BoardAnnotations } from '../utils/board-annotations';
@@ -324,21 +324,27 @@ export function TournamentProgress() {
     };
   }, [getClient, getCommentatorModelCb]);
 
-  // Wire historical prompt and move-by-move narration for replay mode
+  // Wire historical / lesson prompt and move-by-move narration for
+  // replay mode. lessonContext wins over historicalContext when both
+  // are present (lessons frame the AI as the player-teacher; the
+  // historical-game framing is incompatible with that voice).
   const replayHistoricalContext = useTournamentStore(s => s.replayHistoricalContext);
+  const replayLessonContext = useTournamentStore(s => s.replayLessonContext);
   useEffect(() => {
     if (!replayMode || !activeRuntime) return;
     if (queueRef.current) {
-      // Replay: move-by-move commentary (batch size 1) + optional historical prompt
       queueRef.current.setMaxBatchSize(1);
-      // Use model.maxTokens if set (controlled by Tokens dropdown), otherwise default to 16k.
-      // No dead-air constraint in replay — we want rich commentary.
       queueRef.current.setMaxTokensOverride(commentatorModel?.maxTokens ?? 16000);
-      if (replayHistoricalContext) {
-        const ttsMode = useSettingsStore.getState().ttsEnabled;
-        const verbosity = commentatorModel?.verbosity;
-        const prompt = getHistoricalCommentatorPrompt(replayHistoricalContext, ttsMode, verbosity);
-        queueRef.current.setSystemPromptOverride(prompt);
+      const ttsMode = useSettingsStore.getState().ttsEnabled;
+      const verbosity = commentatorModel?.verbosity;
+      if (replayLessonContext) {
+        queueRef.current.setSystemPromptOverride(
+          getLessonCommentatorPrompt(replayLessonContext, ttsMode, verbosity),
+        );
+      } else if (replayHistoricalContext) {
+        queueRef.current.setSystemPromptOverride(
+          getHistoricalCommentatorPrompt(replayHistoricalContext, ttsMode, verbosity),
+        );
       }
     }
     return () => {
@@ -346,7 +352,7 @@ export function TournamentProgress() {
       queueRef.current?.setMaxTokensOverride(undefined);
       queueRef.current?.setSystemPromptOverride(undefined);
     };
-  }, [replayMode, activeRuntime, replayHistoricalContext, commentatorModel?.verbosity, commentatorModel?.maxTokens]);
+  }, [replayMode, activeRuntime, replayHistoricalContext, replayLessonContext, commentatorModel?.verbosity, commentatorModel?.maxTokens]);
 
   // Reset queue on new game — identical for tournament + replay
   useEffect(() => {

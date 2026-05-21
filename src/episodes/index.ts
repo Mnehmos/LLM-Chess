@@ -16,3 +16,4 @@ export {
   listEpisodesBySource,
 } from './registry';
 export { OPERA_GAME_EPISODE } from './opera_game_morphy_1858';
+export { ITALIAN_GAME_LESSON_EPISODE } from './italian_game_lesson';
