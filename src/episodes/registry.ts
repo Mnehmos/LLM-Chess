@@ -28,3 +28,8 @@ export function getEpisode(id: string): Episode | undefined {
 export function listEpisodesBySource(source: EpisodeSource): Episode[] {
   return CHESS_EPISODES.filter((episode) => episode.source === source);
 }
+
+/** All episodes on a given content track. */
+export function listEpisodesByTrack(track: Episode['track']): Episode[] {
+  return CHESS_EPISODES.filter((episode) => episode.track === track);
+}

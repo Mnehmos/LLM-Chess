@@ -33,8 +33,9 @@ import { useBenchmarkStore } from './benchmarkStore';
 import { getStockfishEval } from '../chess/stockfish';
 import type { LLMProviderConfig } from '../llm/client';
 import { createStreamingBridge } from './streamingBridge';
-import { isBroadcastMode } from '../app/broadcastConfig';
-import { buildBroadcastOutroPrompt } from '../llm/prompts';
+import { isBroadcastMode, getBroadcastConfig } from '../app/broadcastConfig';
+import { buildBroadcastOutroPrompt, buildBroadcastFuturesPrompt } from '../llm/prompts';
+import { getEpisode } from '../episodes';
 
 function autoName(config: GauntletTournamentConfig): string {
   const challenger = config.challenger.displayName || config.challenger.model;
@@ -809,12 +810,21 @@ export const useTournamentStore = create<TournamentStore>()(
               if (_waitForNarration) await _waitForNarration();
             }
 
-            // Broadcast outro: standardized Oracle Trust Calibration
-            // sign-off + subscribe CTA. Fires for every MP4 export,
-            // regardless of whether the game completed naturally
-            // (lessons end at a chosen ply with no result; the recap
-            // above wouldn't run, but the outro still should).
+            // Broadcast closing sequence (futures → outro). Standardized
+            // for every MP4 export, regardless of whether the game ended
+            // naturally — lessons end at a chosen ply with `*` and the
+            // recap above is skipped, but the closing sequence still
+            // fires.
+            //
+            // Order matters: the futures block explains the final
+            // position and tees up "what's next" (variation Shorts for
+            // lessons, legacy for historicals, reflection for matches);
+            // the outro is the LAST thing the viewer hears. Locking out
+            // fillers here keeps stray filler clips from generating
+            // between the outro and the recorder stopping.
             if (_commentaryQueue && isBroadcastMode()) {
+              _commentaryQueue.lockOutFillers();
+
               const lessonCtx = useTournamentStore.getState().replayLessonContext;
               const histCtx = useTournamentStore.getState().replayHistoricalContext;
               const kind: 'historical' | 'lesson' | 'match' = lessonCtx
@@ -825,6 +835,27 @@ export const useTournamentStore = create<TournamentStore>()(
               const broadcastTitle = replayState
                 ? `${replayState.white.displayName} vs ${replayState.black.displayName}`
                 : 'this match';
+
+              // Look up the episode by id (broadcast URL param) so we
+              // can pass variation titles to the futures prompt for
+              // lesson tracks. No-op for inline-PGN / unregistered ids.
+              const broadcastEpisodeId = getBroadcastConfig().episodeId;
+              const episode = broadcastEpisodeId ? getEpisode(broadcastEpisodeId) : undefined;
+              const variationTitles = kind === 'lesson'
+                ? (episode?.exports?.variations ?? []).map((v) => v.title)
+                : undefined;
+
+              console.log('[Replay] Generating final-position + futures...');
+              await _commentaryQueue.generateIntro(
+                buildBroadcastFuturesPrompt({
+                  title: broadcastTitle,
+                  kind,
+                  variationTitles,
+                }),
+              );
+              if (_waitForNarration) await _waitForNarration();
+              console.log('[Replay] Futures complete.');
+
               console.log('[Replay] Generating broadcast outro...');
               await _commentaryQueue.generateIntro(
                 buildBroadcastOutroPrompt({ title: broadcastTitle, kind }),

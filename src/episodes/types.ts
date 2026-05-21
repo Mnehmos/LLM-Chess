@@ -24,6 +24,20 @@
 export interface Episode {
   /** Stable identifier (lowercase, underscored). Matches `exports/<id>/`. */
   id: string;
+  /**
+   * Content track. Drives the Shorts production model:
+   *  - 'lesson':     long-form "AI Teaches X" — Shorts are LINE VARIATIONS
+   *                  (each with its own self-contained PGN in
+   *                  `exports.variations`).
+   *  - 'historical': long-form "AI Reviews [game]" — Shorts are KEY MOMENTS
+   *                  sliced from the main PGN by move range
+   *                  (in `exports.shorts`).
+   *
+   * Both tracks share the Oracle Trust Calibration brand and the same
+   * intro/outro scaffold; only the body voice (teacher vs. historian)
+   * and the Shorts shape differ.
+   */
+  track: 'lesson' | 'historical';
   /** Display title used in the UI and on the published video. */
   title: string;
   /** One-paragraph summary for catalog views and the YouTube description. */
@@ -124,8 +138,48 @@ export interface EpisodeExportConfig {
   outputRoot: string;
   /** Candidate descriptions for the published video (YouTube etc.). */
   descriptionCandidates: string[];
-  /** Shorts to slice from the full video. */
+  /**
+   * Move-range clips of the main PGN. Used for Track B (historical) Shorts
+   * where a key moment from the long-form game becomes a 30–60s vertical clip.
+   * Empty for Track A lessons, which use `variations` instead.
+   */
   shorts: EpisodeShortClip[];
+  /**
+   * Line-variation Shorts for Track A (lesson) episodes. Each entry is a
+   * self-contained mini-lesson with its own PGN, lesson context, and
+   * commentator framing — NOT a slice of the main PGN. Captured as
+   * portrait MP4s alongside the long-form.
+   */
+  variations?: VariationShort[];
+}
+
+/**
+ * A line-variation Short for a Track A lesson. Unlike `EpisodeShortClip`
+ * (which slices the main PGN by move range), a variation has its OWN PGN
+ * showing an alternative continuation from a shared root position. The
+ * long-form lesson's "futures" segment tees up the variations; each
+ * variation Short delivers one of them as a 60–90s portrait clip.
+ */
+export interface VariationShort {
+  /** Stable id, namespaced under the parent episode (e.g. 'italian_evans_gambit'). */
+  id: string;
+  /** Display title (e.g. 'Italian Game: Evans Gambit'). */
+  title: string;
+  /** Full PGN of the variation, including headers. Self-contained. */
+  pgn: string;
+  /**
+   * Teacher-voice framing for this specific variation. Spliced into the
+   * lesson commentator prompt so the model knows what idea this line is
+   * demonstrating (e.g. "Evans Gambit — White sacrifices a pawn for
+   * rapid development and central control").
+   */
+  lessonContext: string;
+  /** One-line summary for the YouTube short description. */
+  summary: string;
+  /** Hook line for thumbnails / first sentence of narration. */
+  hook: string;
+  /** Target duration in seconds. Soft target, not enforced. */
+  durationTargetSec: number;
 }
 
 /** A published reference for an Episode (e.g. a YouTube upload). */
