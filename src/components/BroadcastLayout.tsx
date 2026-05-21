@@ -19,6 +19,9 @@ import type { EvalResult } from '../chess/stockfish';
 import { formatEval } from '../chess/stockfish';
 import { Board } from './Board';
 import type { CommentaryEntry } from '../commentary/commentaryQueue';
+import type { NarrationMove } from '../tts/audio-queue';
+import type { BoardAnnotations } from '../utils/board-annotations';
+import type { GameEvent } from '../engine/events';
 
 interface BroadcastLayoutProps {
   gameState: GameState;
@@ -33,19 +36,63 @@ interface BroadcastLayoutProps {
   subtitle?: string;
   /** 'full' = 1920x1080 (landscape); 'short' = 1080x1920 (portrait). */
   orientation: 'full' | 'short';
-  /** Last move played, for board highlighting. */
+  /**
+   * Last move played (latest runtime state). Used as a fallback when
+   * no narration is active. When narrationMoveIndex >= 0 the lastMove
+   * is derived from the narrated position instead.
+   */
   lastMove?: { from: string; to: string };
+  /**
+   * Move index of the commentary currently being narrated. The board
+   * displays the position AFTER this move. -1 means no narration yet
+   * → board shows the latest applied position. Updated by
+   * BroadcastView from AudioNarrationQueue's entry-start callback.
+   */
+  narrationMoveIndex: number;
+  /** Squares to highlight (amber) — from the current sentence's text. */
+  narrationSquares: string[];
+  /** Model-driven board annotations parsed from inline tags. */
+  narrationAnnotations?: BoardAnnotations;
+  /** Move arrows for the currently-narrated move. */
+  narrationArrows: NarrationMove[];
 }
 
 /**
- * Resolve the latest move applied and its turn number for display.
- * In broadcast mode the board ALWAYS shows the latest position —
- * unlike the SPA which gates display on narration progress.
+ * Resolve the move whose narration is currently playing. When
+ * narrationMoveIndex >= 0, the displayed board should reflect the
+ * position AFTER that ply — even if the runtime has already advanced
+ * to a later move.
  */
-function lastMoveInfo(gameState: GameState): { san: string; turnNumber: number; color: 'w' | 'b' } | null {
-  const last = gameState.moveHistory[gameState.moveHistory.length - 1];
-  if (!last) return null;
-  return { san: last.move, turnNumber: last.turnNumber, color: last.color };
+function narratedMoveInfo(
+  gameState: GameState,
+  narrationMoveIndex: number,
+): { san: string; turnNumber: number; color: 'w' | 'b'; fen: string; from?: string; to?: string } | null {
+  const idx = narrationMoveIndex >= 0
+    ? Math.min(narrationMoveIndex, gameState.moveHistory.length - 1)
+    : gameState.moveHistory.length - 1;
+  if (idx < 0) return null;
+  const move = gameState.moveHistory[idx];
+  if (!move) return null;
+  // Find the MoveApplied event for this ply to recover its FEN +
+  // from/to. The eventLog stores them in order; the Nth MoveApplied
+  // corresponds to move index N.
+  let seen = 0;
+  for (const event of gameState.eventLog) {
+    if (event.type !== 'MoveApplied') continue;
+    if (seen === idx) {
+      const ev = event as Extract<GameEvent, { type: 'MoveApplied' }>;
+      return {
+        san: move.move,
+        turnNumber: move.turnNumber,
+        color: move.color,
+        fen: ev.payload.fen,
+        from: ev.payload.from,
+        to: ev.payload.to,
+      };
+    }
+    seen++;
+  }
+  return { san: move.move, turnNumber: move.turnNumber, color: move.color, fen: gameState.fen };
 }
 
 export function BroadcastLayout({
@@ -57,11 +104,28 @@ export function BroadcastLayout({
   subtitle,
   orientation,
   lastMove,
+  narrationMoveIndex,
+  narrationSquares,
+  narrationAnnotations,
+  narrationArrows,
 }: BroadcastLayoutProps) {
+  // The displayed board tracks the narrated move, not the runtime's
+  // latest. When narrationMoveIndex is -1 (no narration yet), fall
+  // back to the latest applied move. Truncating the displayed move
+  // history to narrationMoveIndex+1 also keeps the "recent moves"
+  // panel in sync (we don't list moves the narrator hasn't reached).
+  const effectiveMoveIndex = narrationMoveIndex >= 0 ? narrationMoveIndex : gameState.moveHistory.length - 1;
+  const displayedMoveHistory = gameState.moveHistory.slice(0, Math.max(0, effectiveMoveIndex + 1));
+  const narratedInfo = narratedMoveInfo(gameState, narrationMoveIndex);
+  const displayedFen = narratedInfo?.fen ?? gameState.fen;
+  const displayedLastMove =
+    narratedInfo && narratedInfo.from && narratedInfo.to
+      ? { from: narratedInfo.from, to: narratedInfo.to }
+      : lastMove;
+
   const recentMoves = useMemo(() => {
-    // Last 6 plies, formatted "16. Qb8+!! Nxb8".
-    const all = gameState.moveHistory;
-    const slice = all.slice(Math.max(0, all.length - 6));
+    // Last 6 plies of the DISPLAYED history (not the runtime's).
+    const slice = displayedMoveHistory.slice(Math.max(0, displayedMoveHistory.length - 6));
     const pairs: { turn: number; white?: string; black?: string }[] = [];
     for (const m of slice) {
       const last = pairs[pairs.length - 1];
@@ -74,11 +138,10 @@ export function BroadcastLayout({
       }
     }
     return pairs;
-  }, [gameState.moveHistory]);
+  }, [displayedMoveHistory]);
 
-  const moveInfo = lastMoveInfo(gameState);
-  const moveCounterText = moveInfo
-    ? `Move ${moveInfo.turnNumber}${moveInfo.color === 'b' ? '…' : ''} · ${moveInfo.san}`
+  const moveCounterText = narratedInfo
+    ? `Move ${narratedInfo.turnNumber}${narratedInfo.color === 'b' ? '…' : ''} · ${narratedInfo.san}`
     : 'Move 1';
 
   // Eval bar percentage. Clamps centipawns to ±500 then maps to 0..100%
@@ -101,8 +164,11 @@ export function BroadcastLayout({
 
   if (orientation === 'short') {
     return <ShortLayout
-      gameState={gameState}
-      lastMove={lastMove}
+      displayedFen={displayedFen}
+      lastMove={displayedLastMove}
+      narrationSquares={narrationSquares}
+      narrationAnnotations={narrationAnnotations}
+      narrationArrows={narrationArrows}
       title={title}
       subtitle={subtitle}
       moveCounterText={moveCounterText}
@@ -113,8 +179,11 @@ export function BroadcastLayout({
     />;
   }
   return <FullLayout
-    gameState={gameState}
-    lastMove={lastMove}
+    displayedFen={displayedFen}
+    lastMove={displayedLastMove}
+    narrationSquares={narrationSquares}
+    narrationAnnotations={narrationAnnotations}
+    narrationArrows={narrationArrows}
     title={title}
     subtitle={subtitle}
     moveCounterText={moveCounterText}
@@ -126,8 +195,11 @@ export function BroadcastLayout({
 }
 
 interface LayoutSlotProps {
-  gameState: GameState;
+  displayedFen: string;
   lastMove?: { from: string; to: string };
+  narrationSquares: string[];
+  narrationAnnotations?: BoardAnnotations;
+  narrationArrows: NarrationMove[];
   title: string;
   subtitle?: string;
   moveCounterText: string;
@@ -147,8 +219,11 @@ interface LayoutSlotProps {
  * visually centered inside the left half of a 1920x1080 frame.
  */
 function FullLayout({
-  gameState,
+  displayedFen,
   lastMove,
+  narrationSquares,
+  narrationAnnotations,
+  narrationArrows,
   title,
   subtitle,
   moveCounterText,
@@ -175,7 +250,13 @@ function FullLayout({
             chess geometry. */}
         <section className="flex-1 flex flex-col items-center justify-center px-10 min-w-0">
           <div style={{ zoom: 2.4 }}>
-            <Board fen={gameState.fen} lastMove={lastMove} />
+            <Board
+              fen={displayedFen}
+              lastMove={lastMove}
+              highlightSquares={narrationSquares}
+              arrows={narrationArrows}
+              annotations={narrationAnnotations}
+            />
           </div>
           <EvalBar pct={evalPct} label={evalLabel} className="mt-4 w-[600px]" />
         </section>
@@ -196,8 +277,11 @@ function FullLayout({
  * compact recent-moves row. Optimized for vertical phone consumption.
  */
 function ShortLayout({
-  gameState,
+  displayedFen,
   lastMove,
+  narrationSquares,
+  narrationAnnotations,
+  narrationArrows,
   title,
   subtitle,
   moveCounterText,
@@ -219,7 +303,13 @@ function ShortLayout({
           a thin border at 1080 px frame width. */}
       <section className="shrink-0 flex justify-center py-2">
         <div style={{ zoom: 2.7 }}>
-          <Board fen={gameState.fen} lastMove={lastMove} />
+          <Board
+            fen={displayedFen}
+            lastMove={lastMove}
+            highlightSquares={narrationSquares}
+            arrows={narrationArrows}
+            annotations={narrationAnnotations}
+          />
         </div>
       </section>
 

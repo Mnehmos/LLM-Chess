@@ -6,8 +6,9 @@ import { exportBridge } from '../app/exportBridge';
 import { getEpisode, DEFAULT_EPISODE_ID } from '../episodes';
 import { TournamentProgress } from './TournamentProgress';
 import { BroadcastLayout } from './BroadcastLayout';
-import { getActiveAudioNarrationQueue, runWhenAudioNarrationQueueAvailable } from '../tts/audio-queue';
+import { getActiveAudioNarrationQueue, runWhenAudioNarrationQueueAvailable, type NarrationMove } from '../tts/audio-queue';
 import { createRenderPlanFromPgn, type RenderPlan } from '../production/renderPlan';
+import type { BoardAnnotations } from '../utils/board-annotations';
 
 /**
  * BroadcastView — the chrome-free, auto-playing layout used by the
@@ -53,6 +54,23 @@ export function BroadcastView() {
   const endedRef = useRef(false);
   const commentatorAppliedRef = useRef(false);
 
+  // Narration sync state. Drives the DISPLAYED board (not the runtime
+  // state), so the visible position only advances when narration for
+  // that move actually starts playing. Without this, the runtime's
+  // moveDelayMs + pace-check let the board race ahead of the audio
+  // by 15-30s per move (commentary generation lag), producing video
+  // where the captions are about move N while the board is on N+1.
+  const [narrationMoveIndex, setNarrationMoveIndex] = useState(-1);
+  const [narrationSquares, setNarrationSquares] = useState<string[]>([]);
+  const [narrationAnnotations, setNarrationAnnotations] = useState<BoardAnnotations | undefined>();
+  const [narrationArrows, setNarrationArrows] = useState<NarrationMove[]>([]);
+  // The actual sentence currently being SPOKEN. Drives the caption
+  // panel — not streamingText (which is the LLM stream of whichever
+  // commentary block is generating, possibly several moves AHEAD of
+  // what's audible) and not the last completed commentaryLog entry
+  // (which can be several moves BEHIND if the LLM raced ahead).
+  const [activeNarrationText, setActiveNarrationText] = useState<string>('');
+
   // Apply the episode's commentator model id to the replay store
   // once. Reads existing config via getState() inside the effect so we
   // don't re-stomp the user's reasoning/verbosity settings on every
@@ -71,13 +89,16 @@ export function BroadcastView() {
       id: episodeCommentatorModel,
       name: episodeCommentatorModel,
       mode: 'llm',
-      // Video-friendly defaults. The SPA's default for replay is
-      // reasoning_effort: 'high' + 16000 tokens, which produces 30-
-      // 130s LLM calls and 3-6 minute TTS narrations per move —
-      // overkill for a video clip. Medium + 1500 tokens gives
-      // ~5-15s commentary blocks, narratable in 15-30 seconds.
-      reasoningEffort: 'medium',
-      maxTokens: 1500,
+      // Video-friendly defaults: HIGH reasoning (deep analysis under
+      // the hood) + BRIEF verbosity (terse, video-friendly output).
+      // This is the "think hard, talk less" pattern — the model still
+      // considers the position deeply but produces 1-3 sentence
+      // commentary blocks instead of 600-2000 token paragraphs.
+      // maxTokens caps the visible output; the reasoning tokens are
+      // separate and unlimited within the model's reasoning budget.
+      reasoningEffort: 'high',
+      verbosity: 'brief',
+      maxTokens: 400,
     });
   }, [episodeCommentatorModel, setReplayCommentatorModel]);
 
@@ -132,12 +153,38 @@ export function BroadcastView() {
         // the narration audio.
         const playbackStartedAt = performance.now();
         runWhenAudioNarrationQueueAvailable((audioQueue) => {
-          console.log('[broadcast] attaching MediaRecorder + segment-start callback to audio queue');
+          console.log('[broadcast] attaching audio queue hooks (recorder + narration sync)');
           audioQueue.markPlaybackStart(playbackStartedAt);
+          audioQueue.startRecording();
+          // Broadcast-only sentence callback. Survives CommentaryPanel's
+          // own setSentenceStartCallback calls — they overwrite the
+          // main callback slot, this one is independent. Fires on
+          // every sentence with the full payload + the entry's
+          // moveIndex, so the displayed board + caption + highlights
+          // all update atomically per sentence.
+          audioQueue.setBroadcastSentenceCallback((text, squares, annotations, maxMoveIndex) => {
+            if (text) setActiveNarrationText(text);
+            setNarrationSquares(squares);
+            setNarrationAnnotations(annotations);
+            if (maxMoveIndex !== undefined) {
+              setNarrationMoveIndex((prev) => Math.max(prev, maxMoveIndex));
+            }
+          });
+          // Segment-start still drives the export-bridge segment-
+          // timings record. It also bumps narrationMoveIndex defensively
+          // (in case the sentence callback dropped a frame). Both
+          // calls are idempotent.
           audioQueue.setSegmentStartCallback((moveIndex, offsetMs) => {
             exportBridge.__recordSegmentTiming(moveIndex, offsetMs);
+            setNarrationMoveIndex((prev) => Math.max(prev, moveIndex));
           });
-          audioQueue.startRecording();
+          // Entry-start: just the arrows. CommentaryPanel will
+          // overwrite this callback in its own effect; that's fine
+          // because the broadcast sentence callback covers the
+          // moveIndex update redundantly.
+          audioQueue.setEntryStartCallback((_maxMoveIndex, moves) => {
+            setNarrationArrows(moves);
+          });
         });
 
         startReplay(pgnText, {
@@ -271,7 +318,11 @@ export function BroadcastView() {
       </div>
       <BroadcastLayout
         gameState={activeGameState ?? emptyGameStatePlaceholder()}
-        liveCommentaryText={streamingText || ''}
+        // Caption shows the sentence currently being SPOKEN, not the
+        // (possibly future) LLM-streaming text. Fall back to
+        // streamingText when no sentence has played yet (e.g. during
+        // the pre-roll before the first TTS clip).
+        liveCommentaryText={activeNarrationText || streamingText || ''}
         commentaryEntries={commentaryEntries}
         stockfishEval={stockfishEval}
         title={episode?.title ?? 'Chess Game'}
@@ -280,6 +331,10 @@ export function BroadcastView() {
           (config.viewportHeight ?? 1080) > (config.viewportWidth ?? 1920) ? 'short' : 'full'
         }
         lastMove={lastMove}
+        narrationMoveIndex={narrationMoveIndex}
+        narrationSquares={narrationSquares}
+        narrationAnnotations={narrationAnnotations}
+        narrationArrows={narrationArrows}
       />
     </>
   );

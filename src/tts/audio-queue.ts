@@ -39,6 +39,21 @@ export type EntryStartCallback = (maxMoveIndex: number, moves: NarrationMove[], 
  * composing audio.
  */
 export type SegmentStartCallback = (maxMoveIndex: number, offsetMs: number) => void;
+/**
+ * Fires once per sentence — separate from setSentenceStartCallback so
+ * the broadcast pipeline can listen without conflicting with the SPA's
+ * own sentence-start handler (CommentaryPanel installs its own callback
+ * via setSentenceStartCallback after BroadcastView installs ours).
+ * Receives the full per-sentence payload: text + squares + annotations
+ * + the entry's maxMoveIndex.
+ */
+export type BroadcastSentenceCallback = (
+  text: string,
+  squares: string[],
+  annotations: BoardAnnotations,
+  maxMoveIndex: number | undefined,
+  entryId: string | undefined,
+) => void;
 
 /**
  * Sequential audio narration queue with per-sentence board sync.
@@ -63,6 +78,7 @@ export class AudioNarrationQueue {
   private onSentenceStart: SentenceStartCallback | null = null;
   private onEntryStart: EntryStartCallback | null = null;
   private onSegmentStart: SegmentStartCallback | null = null;
+  private onBroadcastSentence: BroadcastSentenceCallback | null = null;
   /** Tracks which entryId we last fired onEntryStart for. */
   private _lastFiredEntryId: string | null = null;
   /**
@@ -180,6 +196,17 @@ export class AudioNarrationQueue {
    */
   setSegmentStartCallback(cb: SegmentStartCallback | null): void {
     this.onSegmentStart = cb;
+  }
+
+  /**
+   * Set the broadcast-only sentence callback. Distinct from
+   * setSentenceStartCallback (which CommentaryPanel owns via its own
+   * useEffect chain) so the MP4 broadcast pipeline can subscribe
+   * without being overwritten when CommentaryPanel re-runs its
+   * effects. Fires on every sentence with full per-sentence payload.
+   */
+  setBroadcastSentenceCallback(cb: BroadcastSentenceCallback | null): void {
+    this.onBroadcastSentence = cb;
   }
 
   /**
@@ -430,6 +457,16 @@ export class AudioNarrationQueue {
 
         // Fire sentence start callback right before playback
         this.onSentenceStart?.(entry.text, entry.squares, entry.annotations);
+        // Broadcast pipeline mirrors sentence-start with full payload
+        // on its own callback slot (so it isn't clobbered by
+        // CommentaryPanel's setSentenceStartCallback).
+        this.onBroadcastSentence?.(
+          entry.text,
+          entry.squares,
+          entry.annotations,
+          entry.maxMoveIndex,
+          entry.entryId,
+        );
 
         // Fire segment-start callback when this sentence opens a new
         // commentary entry AND we're in broadcast mode (markPlaybackStart
