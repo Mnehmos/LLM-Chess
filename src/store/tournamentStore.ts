@@ -117,6 +117,8 @@ interface TournamentStore {
   replayPriorMoveCount: number;
   /** Historical context string for replay commentary prompt. */
   replayHistoricalContext: string | null;
+  /** Lesson framing for the commentator (teacher voice). Mutually exclusive with replayHistoricalContext. */
+  replayLessonContext: string | null;
   /** Commentator model for replay mode (independent of tournament config). */
   replayCommentatorModel: CommentatorConfig | null;
   setReplayCommentatorModel: (model: CommentatorConfig | null) => void;
@@ -150,7 +152,7 @@ interface TournamentStore {
   resumeGame: (matchIndex: number, pairIndex: number, slotIndex: 0 | 1) => void;
 
   // Replay actions
-  startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean }) => void;
+  startReplay: (pgn: string, config: { historicalContext?: string; lessonContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean }) => void;
   stopReplay: () => void;
 
   // Multi-tournament actions
@@ -204,6 +206,7 @@ export const useTournamentStore = create<TournamentStore>()(
       replayMode: false,
       replayPriorMoveCount: 0,
       replayHistoricalContext: null,
+      replayLessonContext: null,
       replayCommentatorModel: null,
       setReplayCommentatorModel: (model) => set({ replayCommentatorModel: model }),
       streamingText: '',
@@ -635,7 +638,7 @@ export const useTournamentStore = create<TournamentStore>()(
 
       // --- Replay actions ---
 
-      startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean }) => {
+      startReplay: (pgn: string, config: { historicalContext?: string; lessonContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean }) => {
         const { activeRuntime } = get();
         if (activeRuntime) {
           activeRuntime.abort('Starting replay');
@@ -756,6 +759,7 @@ export const useTournamentStore = create<TournamentStore>()(
           replayMode: true,
           replayPriorMoveCount: priorMoveHistory?.length ?? 0,
           replayHistoricalContext: config.historicalContext || null,
+          replayLessonContext: config.lessonContext || null,
           isRunning: true,
           isPaused: false,
           waitingForStart: false,

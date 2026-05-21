@@ -44,6 +44,7 @@ export function BroadcastView() {
   const [pgnText] = useState<string | null>(() => resolvePgnSource(config).pgnText);
   const [loadError] = useState<string | null>(() => resolvePgnSource(config).error);
   const [historicalContext] = useState<string | undefined>(() => resolvePgnSource(config).historicalContext);
+  const [lessonContext] = useState<string | undefined>(() => resolvePgnSource(config).lessonContext);
   const [episodeCommentatorModel] = useState<string | null>(() => resolvePgnSource(config).commentatorModel);
   // Pre-parsed PGN moves. BroadcastLayout uses these to look up per-ply
   // FEN / from / to, because the runtime's eventLog only contains
@@ -203,6 +204,7 @@ export function BroadcastView() {
 
         startReplay(pgnText, {
           historicalContext,
+          lessonContext,
           // Broadcast mode: each move waits on commentary + narration
           // before the next fires (paceWithNarration). A small
           // moveDelayMs gives the FIRST move's commentary time to
@@ -226,7 +228,7 @@ export function BroadcastView() {
         if (replayMode) stopReplay();
       },
     });
-  }, [pgnText, historicalContext, startReplay, stopReplay, replayMode, shortRange?.startPly]);
+  }, [pgnText, historicalContext, lessonContext, startReplay, stopReplay, replayMode, shortRange?.startPly]);
 
   useEffect(() => {
     exportBridge.__markReplayReady(Boolean(pgnText) && !loadError);
@@ -409,6 +411,8 @@ interface ResolvedPgnSource {
   pgnText: string | null;
   error: string | null;
   historicalContext: string | undefined;
+  /** Teacher-voice prompt for lessons. Mutually exclusive with historicalContext. */
+  lessonContext: string | undefined;
   commentatorModel: string | null;
   /** When ?shortId= matches an authored clip, its ply range. Else null. */
   shortRange: { startPly: number; endPly: number; clipId: string } | null;
@@ -425,6 +429,7 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
       pgnText: config.rawPgn,
       error: null,
       historicalContext: undefined,
+      lessonContext: undefined,
       commentatorModel: null,
       shortRange: null,
     };
@@ -435,6 +440,7 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
       pgnText: null,
       error: 'No episode id supplied and no default episode is registered.',
       historicalContext: undefined,
+      lessonContext: undefined,
       commentatorModel: null,
       shortRange: null,
     };
@@ -445,6 +451,7 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
       pgnText: null,
       error: `Unknown episode id "${episodeId}". Check src/episodes/registry.ts.`,
       historicalContext: undefined,
+      lessonContext: undefined,
       commentatorModel: null,
       shortRange: null,
     };
@@ -459,6 +466,7 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
           episode.exports?.shorts.map((s) => s.id).join(', ') ?? '(none)'
         }`,
         historicalContext: episode.historicalContext,
+        lessonContext: episode.commentator.lessonContext,
         commentatorModel: episode.commentator.model,
         shortRange: null,
       };
@@ -473,6 +481,7 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
     pgnText: episode.pgn,
     error: null,
     historicalContext: episode.historicalContext,
+    lessonContext: episode.commentator.lessonContext,
     commentatorModel: episode.commentator.model,
     shortRange,
   };

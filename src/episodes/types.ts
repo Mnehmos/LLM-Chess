@@ -38,6 +38,9 @@ export interface Episode {
    * Historical context injected into the commentator system prompt so it
    * has dates, tournament names, player background, and any quirks worth
    * narrating without having to recall them.
+   *
+   * Mutually exclusive with `commentator.lessonContext` — episodes that
+   * set the lesson context use the teacher prompt builder instead.
    */
   historicalContext?: string;
   /** Export configuration. Present once the episode is planned for export. */
@@ -80,6 +83,14 @@ export interface EpisodeCommentatorConfig {
    * the global commentator system prompt is not enough.
    */
   systemPromptAddition?: string;
+  /**
+   * Lesson context — when set, the commentator uses a TEACHER voice
+   * (first-person, "I'm playing X because Y") via
+   * getLessonCommentatorPrompt instead of the historical narrator voice.
+   * Use this for "AI teaches X opening" episodes. Mutually exclusive
+   * with the Episode-level historicalContext field.
+   */
+  lessonContext?: string;
 }
 
 /**
