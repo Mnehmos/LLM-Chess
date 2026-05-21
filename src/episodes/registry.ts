@@ -4,6 +4,10 @@ import { RUY_LOPEZ_LESSON_EPISODE } from './ruy_lopez_lesson';
 import { SICILIAN_NAJDORF_LESSON_EPISODE } from './sicilian_najdorf_lesson';
 import { FRENCH_WINAWER_LESSON_EPISODE } from './french_winawer_lesson';
 import { QGD_ORTHODOX_LESSON_EPISODE } from './qgd_orthodox_lesson';
+import { CARO_KANN_CLASSICAL_LESSON_EPISODE } from './caro_kann_classical_lesson';
+import { KINGS_INDIAN_CLASSICAL_LESSON_EPISODE } from './kings_indian_classical_lesson';
+import { NIMZO_INDIAN_CLASSICAL_LESSON_EPISODE } from './nimzo_indian_classical_lesson';
+import { CATALAN_OPEN_LESSON_EPISODE } from './catalan_open_lesson';
 import type { Episode, EpisodeSource } from './types';
 
 /**
@@ -19,6 +23,10 @@ export const CHESS_EPISODES: Episode[] = [
   SICILIAN_NAJDORF_LESSON_EPISODE,
   FRENCH_WINAWER_LESSON_EPISODE,
   QGD_ORTHODOX_LESSON_EPISODE,
+  CARO_KANN_CLASSICAL_LESSON_EPISODE,
+  KINGS_INDIAN_CLASSICAL_LESSON_EPISODE,
+  NIMZO_INDIAN_CLASSICAL_LESSON_EPISODE,
+  CATALAN_OPEN_LESSON_EPISODE,
 ];
 
 /** Default episode id when no `?episode=` is specified. */
