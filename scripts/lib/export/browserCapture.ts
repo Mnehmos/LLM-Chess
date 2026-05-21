@@ -33,6 +33,13 @@ export interface CaptureOptions {
    * markEnded once the short's last ply has been played.
    */
   shortId?: string;
+  /**
+   * Variation id, passed as ?variationId=<id>. BroadcastView resolves
+   * the variation's own PGN + lessonContext + title for the capture;
+   * the parent episode supplies the commentator config. Used for
+   * Track A line-variation Shorts (portrait 1080x1920).
+   */
+  variationId?: string;
   /** Output frame dir (absolute path). Will be created. */
   frameDir: string;
   /** Viewport for the capture. */
@@ -308,6 +315,7 @@ function buildUrl(options: CaptureOptions): string {
   if (options.episodeId) url.searchParams.set('episode', options.episodeId);
   if (options.rawPgn) url.searchParams.set('pgn', options.rawPgn);
   if (options.shortId) url.searchParams.set('shortId', options.shortId);
+  if (options.variationId) url.searchParams.set('variationId', options.variationId);
   url.searchParams.set('w', String(options.viewport.width));
   url.searchParams.set('h', String(options.viewport.height));
   return url.toString();

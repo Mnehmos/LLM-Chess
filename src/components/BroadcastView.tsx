@@ -52,6 +52,8 @@ export function BroadcastView() {
   const [historicalContext] = useState<string | undefined>(() => resolvePgnSource(config).historicalContext);
   const [lessonContext] = useState<string | undefined>(() => resolvePgnSource(config).lessonContext);
   const [episodeCommentatorModel] = useState<string | null>(() => resolvePgnSource(config).commentatorModel);
+  const [titleOverride] = useState<string | undefined>(() => resolvePgnSource(config).titleOverride);
+  const [subtitleOverride] = useState<string | undefined>(() => resolvePgnSource(config).subtitleOverride);
   // Pre-parsed PGN moves. BroadcastLayout uses these to look up per-ply
   // FEN / from / to, because the runtime's eventLog only contains
   // MoveApplied events for moves the replay actually emits — not the
@@ -352,8 +354,8 @@ export function BroadcastView() {
         liveCommentaryText={activeNarrationText || streamingText || ''}
         commentaryEntries={commentaryEntries}
         stockfishEval={stockfishEval}
-        title={episode?.title ?? 'Chess Game'}
-        subtitle={episode?.summary?.split('.')[0]}
+        title={titleOverride ?? episode?.title ?? 'Chess Game'}
+        subtitle={subtitleOverride ?? episode?.summary?.split('.')[0]}
         orientation={
           (config.viewportHeight ?? 1080) > (config.viewportWidth ?? 1920) ? 'short' : 'full'
         }
@@ -427,12 +429,23 @@ interface ResolvedPgnSource {
   commentatorModel: string | null;
   /** When ?shortId= matches an authored clip, its ply range. Else null. */
   shortRange: { startPly: number; endPly: number; clipId: string } | null;
+  /** Override display title (used for variation captures). */
+  titleOverride?: string;
+  /** Override subtitle (used for variation captures). */
+  subtitleOverride?: string;
 }
 
 /**
  * Resolve a BroadcastConfig to a PGN source, historical context,
  * commentator model, and (Phase 4) authored-short ply range. Pure /
  * synchronous so it can run inside a useState initializer.
+ *
+ * Resolution precedence:
+ *   1. ?pgn=         raw inline PGN, no episode context
+ *   2. ?variationId= variation of an episode (parent episode's commentator,
+ *                    variation's own PGN + lessonContext + title)
+ *   3. ?shortId=     authored short clip of an episode (slice main PGN)
+ *   4. (default)     full episode
  */
 function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): ResolvedPgnSource {
   if (config.rawPgn) {
@@ -465,6 +478,33 @@ function resolvePgnSource(config: ReturnType<typeof getBroadcastConfig>): Resolv
       lessonContext: undefined,
       commentatorModel: null,
       shortRange: null,
+    };
+  }
+  // Variation capture: replace the long-form PGN + lesson context + title
+  // with the variation's, but keep the parent episode's commentator config.
+  if (config.variationId) {
+    const variation = episode.exports?.variations?.find((v) => v.id === config.variationId);
+    if (!variation) {
+      return {
+        pgnText: episode.pgn,
+        error: `Unknown variationId "${config.variationId}" for episode "${episode.id}". Available: ${
+          episode.exports?.variations?.map((v) => v.id).join(', ') ?? '(none)'
+        }`,
+        historicalContext: episode.historicalContext,
+        lessonContext: episode.commentator.lessonContext,
+        commentatorModel: episode.commentator.model,
+        shortRange: null,
+      };
+    }
+    return {
+      pgnText: variation.pgn,
+      error: null,
+      historicalContext: undefined,
+      lessonContext: variation.lessonContext,
+      commentatorModel: episode.commentator.model,
+      shortRange: null,
+      titleOverride: variation.title,
+      subtitleOverride: variation.summary,
     };
   }
   let shortRange: ResolvedPgnSource['shortRange'] = null;

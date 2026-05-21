@@ -12,7 +12,8 @@ import { downloadSingleGameJSON } from '../utils/export';
 import { CommentaryQueue, type CommentaryEntry } from '../commentary/commentaryQueue';
 import { createLLMClient } from '../llm/client';
 import { getHistoricalCommentatorPrompt, getLessonCommentatorPrompt, buildBroadcastIntroPrompt, buildPuzzleBreakIntroPrompt, buildPuzzleSetupPromptWithOracle, buildPuzzleCommentaryTurnPromptWithOracle, buildPuzzleOutroPromptWithOracle } from '../llm/prompts';
-import { isBroadcastMode } from '../app/broadcastConfig';
+import { isBroadcastMode, getBroadcastConfig } from '../app/broadcastConfig';
+import { getEpisode } from '../episodes';
 import { runResilientTextGeneration } from '../llm/resilient-text';
 import { fetchLichessPuzzle, getPuzzleFamilyId, prefillPuzzlePool, type LichessPuzzle, type PuzzleTurn } from '../commentary/puzzleBreak';
 import { parseAnnotations, EMPTY_ANNOTATIONS, parsePuzzleMoves, hasAnnotations, mergeAnnotations, type BoardAnnotations } from '../utils/board-annotations';
@@ -471,8 +472,17 @@ export function TournamentProgress() {
         // prompts below and ensures every export has consistent
         // brand framing.
         if (isBroadcastMode()) {
-          const broadcastTitle =
-            replayMode && activeGameState.white.displayName && activeGameState.black.displayName
+          const broadcastCfg = getBroadcastConfig();
+          const broadcastEpisode = broadcastCfg.episodeId ? getEpisode(broadcastCfg.episodeId) : undefined;
+          const activeVariation = broadcastCfg.variationId
+            ? broadcastEpisode?.exports?.variations?.find((v) => v.id === broadcastCfg.variationId)
+            : undefined;
+          // For variation captures the matchup-style title is generic
+          // ("Teacher (W) vs Teacher (B)"). Use the variation title
+          // instead so the intro names the actual content.
+          const broadcastTitle = activeVariation
+            ? activeVariation.title
+            : replayMode && activeGameState.white.displayName && activeGameState.black.displayName
               ? `${activeGameState.white.displayName} vs ${activeGameState.black.displayName}`
               : 'this match';
           const kind: 'historical' | 'lesson' | 'match' = useTournamentStore.getState().replayLessonContext

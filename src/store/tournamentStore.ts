@@ -832,18 +832,35 @@ export const useTournamentStore = create<TournamentStore>()(
                 : histCtx
                   ? 'historical'
                   : 'match';
-              const broadcastTitle = replayState
-                ? `${replayState.white.displayName} vs ${replayState.black.displayName}`
-                : 'this match';
-
               // Look up the episode by id (broadcast URL param) so we
               // can pass variation titles to the futures prompt for
               // lesson tracks. No-op for inline-PGN / unregistered ids.
-              const broadcastEpisodeId = getBroadcastConfig().episodeId;
-              const episode = broadcastEpisodeId ? getEpisode(broadcastEpisodeId) : undefined;
-              const variationTitles = kind === 'lesson'
+              //
+              // When capturing a variation (URL ?variationId=<id>),
+              // the futures block is for the variation itself — don't
+              // tease the parent's variation list (it would name-check
+              // the very variation we're recording). Fall back to the
+              // generic "alternative lines you could explore" framing
+              // by leaving variationTitles undefined.
+              const broadcastCfg = getBroadcastConfig();
+              const episode = broadcastCfg.episodeId ? getEpisode(broadcastCfg.episodeId) : undefined;
+              const activeVariation = broadcastCfg.variationId
+                ? episode?.exports?.variations?.find((v) => v.id === broadcastCfg.variationId)
+                : undefined;
+              const isVariationCapture = Boolean(activeVariation);
+              const variationTitles = kind === 'lesson' && !isVariationCapture
                 ? (episode?.exports?.variations ?? []).map((v) => v.title)
                 : undefined;
+
+              // For variation captures the PGN player names are generic
+              // ("Teacher (W)" / "Teacher (B)") — use the variation title
+              // for the outro closer instead. For everything else the
+              // matchup title (white vs black) is the natural framing.
+              const broadcastTitle = activeVariation
+                ? activeVariation.title
+                : replayState
+                  ? `${replayState.white.displayName} vs ${replayState.black.displayName}`
+                  : 'this match';
 
               console.log('[Replay] Generating final-position + futures...');
               await _commentaryQueue.generateIntro(
