@@ -33,17 +33,54 @@ export interface ComposeOptions {
 }
 
 /**
- * Run ffmpeg to encode the frame sequence into a playable MP4.
+ * Upload-grade H.264 encoder args, shared between the compose pass and
+ * the dead-air re-encode. The previous CRF-20 / veryfast setup
+ * produced 0.1–0.5 Mbps streams for mostly-static board content, which
+ * smeared text and thin board lines once YouTube re-encoded them.
  *
- * Args breakdown:
- *   -framerate <rate>         expected input frame rate
- *   -i frame_%08d.jpg         glob of JPEG inputs
- *   -c:v libx264              widely-supported H.264 encoder
- *   -pix_fmt yuv420p          required for QuickTime / browser playback
- *   -movflags +faststart      enables streaming (metadata at file head)
- *   -preset veryfast          balance speed vs. file size; iteration friendly
- *   -crf 20                   visually transparent quality (good for code text)
- *   -y                        overwrite output without prompting
+ * Target: 1080p text-heavy content that survives one round of YouTube
+ * transcode without breaking down. Both landscape (1920×1080) and
+ * portrait (1080×1920) carry ~2M pixels per frame, so the same target
+ * bitrate works for both.
+ *
+ *   -b:v 8M -maxrate 10M -bufsize 16M  8 Mbps target with headroom
+ *   -preset slow                       better compression at same bitrate
+ *                                      (trades encode time for quality)
+ *   -tune stillimage                   x264 mode optimized for static
+ *                                      text/diagram content
+ *   -profile:v high -level 4.1         standard 1080p H.264 profile
+ *   -pix_fmt yuv420p                   QuickTime / browser compat
+ *   -movflags +faststart               metadata at file head for streaming
+ */
+const VIDEO_ENCODE_ARGS = [
+  '-c:v', 'libx264',
+  '-preset', 'slow',
+  '-tune', 'stillimage',
+  '-profile:v', 'high',
+  '-level', '4.1',
+  '-pix_fmt', 'yuv420p',
+  '-b:v', '8M',
+  '-maxrate', '10M',
+  '-bufsize', '16M',
+  '-movflags', '+faststart',
+];
+
+/**
+ * AAC audio encoder args. 192 kbps stereo is the upper end of what
+ * YouTube accepts without re-encoding for AAC sources — keeps the
+ * narration crisp through the re-transcode.
+ */
+const AUDIO_ENCODE_ARGS = [
+  '-c:a', 'aac',
+  '-b:a', '192k',
+  '-ar', '48000',
+];
+
+export { VIDEO_ENCODE_ARGS, AUDIO_ENCODE_ARGS };
+
+/**
+ * Run ffmpeg to encode the frame sequence into a playable MP4.
+ * See VIDEO_ENCODE_ARGS above for the codec settings rationale.
  */
 export async function composeMp4(options: ComposeOptions): Promise<void> {
   await mkdir(path.dirname(options.outputPath), { recursive: true });
@@ -55,22 +92,10 @@ export async function composeMp4(options: ComposeOptions): Promise<void> {
     '-i',
     path.join(options.frameDir, 'frame_%08d.jpg'),
     ...(hasAudio ? ['-i', options.audioPath as string] : []),
-    '-c:v',
-    'libx264',
-    '-pix_fmt',
-    'yuv420p',
-    '-movflags',
-    '+faststart',
-    '-preset',
-    'veryfast',
-    '-crf',
-    '20',
+    ...VIDEO_ENCODE_ARGS,
     ...(hasAudio
       ? [
-          '-c:a',
-          'aac',
-          '-b:a',
-          '160k',
+          ...AUDIO_ENCODE_ARGS,
           // Map: video from input 0, audio from input 1.
           '-map',
           '0:v:0',

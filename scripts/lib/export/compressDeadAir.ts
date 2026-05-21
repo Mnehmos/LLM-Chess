@@ -28,6 +28,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { registerPid } from './processRegistry';
+import { VIDEO_ENCODE_ARGS, AUDIO_ENCODE_ARGS } from './ffmpegCompose';
 
 export interface CompressDeadAirOptions {
   /** Input MP4 (with audio) produced by the first compose pass. */
@@ -187,6 +188,9 @@ export async function compressDeadAir(opts: CompressDeadAirOptions): Promise<Com
     throw new Error('[dead-air] All audio detected as silence — refusing to produce an empty MP4.');
   }
   const filter = buildTrimConcatFilter(keeps);
+  // Re-encode with the same upload-grade settings as the first compose
+  // pass. The trim+concat filter forces a re-encode (no -c copy
+  // possible), so quality settings here determine the FINAL upload.
   const args = [
     '-y',
     '-i',
@@ -197,20 +201,8 @@ export async function compressDeadAir(opts: CompressDeadAirOptions): Promise<Com
     '[outv]',
     '-map',
     '[outa]',
-    '-c:v',
-    'libx264',
-    '-pix_fmt',
-    'yuv420p',
-    '-preset',
-    'veryfast',
-    '-crf',
-    '20',
-    '-movflags',
-    '+faststart',
-    '-c:a',
-    'aac',
-    '-b:a',
-    '160k',
+    ...VIDEO_ENCODE_ARGS,
+    ...AUDIO_ENCODE_ARGS,
     opts.outputPath,
   ];
   await runFfmpeg(opts.ffmpegPath, args);
