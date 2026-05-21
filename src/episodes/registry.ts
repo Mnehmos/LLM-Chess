@@ -1,5 +1,9 @@
 import { OPERA_GAME_EPISODE } from './opera_game_morphy_1858';
 import { ITALIAN_GAME_LESSON_EPISODE } from './italian_game_lesson';
+import { RUY_LOPEZ_LESSON_EPISODE } from './ruy_lopez_lesson';
+import { SICILIAN_NAJDORF_LESSON_EPISODE } from './sicilian_najdorf_lesson';
+import { FRENCH_WINAWER_LESSON_EPISODE } from './french_winawer_lesson';
+import { QGD_ORTHODOX_LESSON_EPISODE } from './qgd_orthodox_lesson';
 import type { Episode, EpisodeSource } from './types';
 
 /**
@@ -11,6 +15,10 @@ import type { Episode, EpisodeSource } from './types';
 export const CHESS_EPISODES: Episode[] = [
   OPERA_GAME_EPISODE,
   ITALIAN_GAME_LESSON_EPISODE,
+  RUY_LOPEZ_LESSON_EPISODE,
+  SICILIAN_NAJDORF_LESSON_EPISODE,
+  FRENCH_WINAWER_LESSON_EPISODE,
+  QGD_ORTHODOX_LESSON_EPISODE,
 ];
 
 /** Default episode id when no `?episode=` is specified. */

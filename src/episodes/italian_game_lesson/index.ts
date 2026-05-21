@@ -18,7 +18,7 @@ import { ITALIAN_GAME_EXPORT } from './exports';
 export const ITALIAN_GAME_LESSON_EPISODE: Episode = {
   id: 'italian_game_lesson',
   track: 'lesson',
-  title: 'AI Teaches the Italian Game',
+  title: 'Italian Game Explained by an AI (Giuoco Piano, Move by Move)',
   summary:
     'An AI walks through the Italian Game (Giuoco Piano main line), playing both sides of a 12-move demonstration and explaining each idea in real time.',
   source: 'agent_generated',
