@@ -31,6 +31,12 @@ export function BroadcastView() {
   const stopReplay = useTournamentStore(s => s.stopReplay);
   const activeGameState = useTournamentStore(s => s.activeGameState);
   const replayMode = useTournamentStore(s => s.replayMode);
+  // The store's post-game .then() block (recap → broadcast outro →
+  // narration drain) only flips isRunning to false at the very end.
+  // Waiting on it — not just terminal game status — is what keeps
+  // finalizeRecording from stopping the MediaRecorder before the
+  // outro audio is enqueued and played.
+  const isRunning = useTournamentStore(s => s.isRunning);
   const setReplayCommentatorModel = useTournamentStore(s => s.setReplayCommentatorModel);
   const ttsEnabled = useSettingsStore(s => s.ttsEnabled);
   // Subscribed via hook so changes trigger BroadcastLayout re-renders.
@@ -263,7 +269,12 @@ export function BroadcastView() {
     const status = activeGameState.status;
     const isTerminal = status !== 'created' && status !== 'in_progress';
     const shortDone = shortRange && activeGameState.moveHistory.length >= shortRange.endPly + 1;
-    if (!isTerminal && !shortDone) return;
+    // Wait for BOTH terminal status AND isRunning=false. The store
+    // flips isRunning at the end of its post-game .then() block,
+    // AFTER recap + broadcast outro have been generated and the
+    // narration queue has drained. Without that gate, this effect
+    // would stop the MediaRecorder before the outro audio plays.
+    if ((!isTerminal && !shortDone) || isRunning) return;
 
     // Once-only: the effect re-runs on every game state change, but
     // we want to flip ended (and stop the recorder) exactly once.
@@ -274,7 +285,7 @@ export function BroadcastView() {
       exportBridge.__markEnded();
       if (shortDone && !isTerminal) stopReplay();
     });
-  }, [activeGameState, shortRange, stopReplay]);
+  }, [activeGameState, shortRange, stopReplay, isRunning]);
 
   if (loadError) {
     return (

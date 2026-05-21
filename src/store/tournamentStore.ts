@@ -33,6 +33,8 @@ import { useBenchmarkStore } from './benchmarkStore';
 import { getStockfishEval } from '../chess/stockfish';
 import type { LLMProviderConfig } from '../llm/client';
 import { createStreamingBridge } from './streamingBridge';
+import { isBroadcastMode } from '../app/broadcastConfig';
+import { buildBroadcastOutroPrompt } from '../llm/prompts';
 
 function autoName(config: GauntletTournamentConfig): string {
   const challenger = config.challenger.displayName || config.challenger.model;
@@ -806,6 +808,31 @@ export const useTournamentStore = create<TournamentStore>()(
               );
               if (_waitForNarration) await _waitForNarration();
             }
+
+            // Broadcast outro: standardized Oracle Trust Calibration
+            // sign-off + subscribe CTA. Fires for every MP4 export,
+            // regardless of whether the game completed naturally
+            // (lessons end at a chosen ply with no result; the recap
+            // above wouldn't run, but the outro still should).
+            if (_commentaryQueue && isBroadcastMode()) {
+              const lessonCtx = useTournamentStore.getState().replayLessonContext;
+              const histCtx = useTournamentStore.getState().replayHistoricalContext;
+              const kind: 'historical' | 'lesson' | 'match' = lessonCtx
+                ? 'lesson'
+                : histCtx
+                  ? 'historical'
+                  : 'match';
+              const broadcastTitle = replayState
+                ? `${replayState.white.displayName} vs ${replayState.black.displayName}`
+                : 'this match';
+              console.log('[Replay] Generating broadcast outro...');
+              await _commentaryQueue.generateIntro(
+                buildBroadcastOutroPrompt({ title: broadcastTitle, kind }),
+              );
+              if (_waitForNarration) await _waitForNarration();
+              console.log('[Replay] Outro complete.');
+            }
+
             set({
               activeRuntime: null,
               isRunning: false,

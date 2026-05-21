@@ -521,6 +521,95 @@ When the opponent plays, briefly explain what they did and how it affects your p
   return lessonPreamble + COMMENTATOR_SYSTEM_PROMPT_BASE + (ttsMode ? COMMENTATOR_STYLE_TTS : COMMENTATOR_STYLE_RICH) + verbDir;
 }
 
+// ─── Broadcast intro / outro ────────────────────────────────────────
+//
+// Standardized framing applied to EVERY MP4 export, regardless of
+// episode kind (historical replay, lesson, AI-vs-AI match). The user
+// brand is the Mnemosyne Research Institute; the project's public-
+// facing name is Oracle Trust Calibration. Chess is the test bed
+// because every move is verifiable, every position is recoverable,
+// and the LLM cannot hide behind ambiguity.
+//
+// These prompt builders are called by TournamentProgress / startReplay
+// only when broadcastConfig.exportMode is true — normal SPA play
+// uses the existing per-mode intro prompts untouched.
+
+const BROADCAST_BRAND_BLURB = `Oracle Trust Calibration is a series from the Mnemosyne Research Institute that uses chess to benchmark how large language models behave under unreliable context — adversarial prompts, corrupted positions, conflicting feedback. Chess works as a test bed because every move is verifiable and every position is recoverable, so we can see exactly when and how an AI's grip on truth slips.`;
+
+export type BroadcastFormatKind = 'historical' | 'lesson' | 'match';
+
+interface BroadcastIntroSpec {
+  /** Episode / lesson / match title. */
+  title: string;
+  /** What kind of video this is — informs the format sentence. */
+  kind: BroadcastFormatKind;
+  /** One-sentence specific framing for this episode (e.g. "the Opera Game finishing combination"). */
+  episodeBlurb?: string;
+}
+
+/**
+ * Build the prompt that asks the commentator LLM to write the
+ * STANDARDIZED broadcast intro. Constraints:
+ *  - 3-5 sentences total
+ *  - Open with "Oracle Trust Calibration" / "Mnemosyne Research
+ *    Institute" framing (the brand)
+ *  - Name the format ("today's lesson", "this replay", "this match")
+ *  - Mention the specific game / topic
+ *  - Hand off to the body of the video naturally
+ *
+ * Keeps the rest of the per-move commentary prompts untouched —
+ * this only fires for the very first intro entry.
+ */
+export function buildBroadcastIntroPrompt(spec: BroadcastIntroSpec): string {
+  const formatSentence =
+    spec.kind === 'lesson'
+      ? `Today's lesson: ${spec.title}.${spec.episodeBlurb ? ` ${spec.episodeBlurb}.` : ''}`
+      : spec.kind === 'historical'
+        ? `This is a historical-game replay: ${spec.title}.${spec.episodeBlurb ? ` ${spec.episodeBlurb}.` : ''}`
+        : `This is an AI-vs-AI match: ${spec.title}.${spec.episodeBlurb ? ` ${spec.episodeBlurb}.` : ''}`;
+
+  return `Write the STANDARDIZED Oracle Trust Calibration intro for this video. Three to five sentences, spoken aloud, conversational.
+
+Required brand framing (re-state in your own words, do not quote verbatim):
+${BROADCAST_BRAND_BLURB}
+
+Required format framing:
+${formatSentence}
+
+End the intro by smoothly handing off to the body of the video (the first move / the demonstration / the match start). Do NOT use list formatting, headers, or markdown — this is spoken narration. Do NOT mention "the intro", "the video", or "the audience" — just deliver the content.`;
+}
+
+/**
+ * Build the prompt that asks the commentator LLM to write the
+ * STANDARDIZED broadcast outro. Constraints:
+ *  - 2-4 sentences
+ *  - Brief recap line ("That wraps the lesson on X" / "That's the
+ *    finish to Y") in the commentator's existing voice
+ *  - CTA to subscribe to the channel for more Oracle Trust
+ *    Calibration content
+ *  - Sign off naturally
+ *
+ * Does NOT spell out a URL — the YouTube channel link goes in the
+ * video description, not the spoken track. URLs sound robotic over
+ * TTS and break voice consistency.
+ */
+export function buildBroadcastOutroPrompt(spec: BroadcastIntroSpec): string {
+  const closer =
+    spec.kind === 'lesson'
+      ? `That wraps today's lesson on ${spec.title}.`
+      : spec.kind === 'historical'
+        ? `That's the finish to ${spec.title}.`
+        : `That's the match between the two AIs.`;
+
+  return `Write the STANDARDIZED Oracle Trust Calibration outro for this video. Two to four sentences, spoken aloud, in the same voice you've been using.
+
+1. Open with a clean closer like: ${closer}
+2. Add one sentence reflecting on what the video showed — what the viewer can take away (a pattern, an idea, an insight about how AI thinks under verifiable constraint).
+3. End with a subscribe CTA — invite the viewer to subscribe for more Oracle Trust Calibration content from the Mnemosyne Research Institute.
+
+Do NOT spell out a URL — the channel link is in the description. Do NOT use list formatting or markdown. Do NOT mention "the outro", "the video", or "the audience". Just deliver the content.`;
+}
+
 /**
  * Build a commentary system prompt for historical game replay.
  * Prepends historical context to the standard commentator prompt so the LLM
