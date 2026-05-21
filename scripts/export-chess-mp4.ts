@@ -13,8 +13,14 @@
  * Shorts modes:
  *   --short=<id1,id2>      authored move-range clips (Track B)
  *   --all-shorts           every authored short (Track B)
- *   --variation=<id1,id2>  line-variation Shorts (Track A) — portrait 1080x1920
+ *   --variation=<id1,id2>  line-variation Shorts (Track A)
  *   --all-variations       every line-variation Short for the episode
+ *
+ * Orientations (default: both):
+ *   <base>.mp4             landscape (1920x1080)
+ *   <base>_portrait.mp4    portrait (1080x1920)
+ *   --landscape-only       skip the portrait render
+ *   --portrait-only        skip the landscape render
  *
  * TTS narration in the final MP4 (Phase 3.1):
  *   Configure via a gitignored `.env` at the repo root, or via env
@@ -173,6 +179,13 @@ interface CliFlags {
   variationIds: string[];
   /** When true, capture every line-variation Short (and skip full). */
   allVariations: boolean;
+  /**
+   * Which orientations to render. Default: both (every PGN run produces
+   * a 1920x1080 landscape MP4 AND a 1080x1920 portrait MP4). Pass
+   * --landscape-only / --portrait-only to skip one.
+   */
+  renderLandscape: boolean;
+  renderPortrait: boolean;
 }
 
 function parseFlags(argv: string[]): CliFlags {
@@ -187,6 +200,8 @@ function parseFlags(argv: string[]): CliFlags {
     allShorts: false,
     variationIds: [],
     allVariations: false,
+    renderLandscape: true,
+    renderPortrait: true,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -219,6 +234,11 @@ function parseFlags(argv: string[]): CliFlags {
       const value = arg.slice(arg.indexOf('=') + 1);
       if (value) flags.variationIds.push(...value.split(',').map((s) => s.trim()).filter(Boolean));
     }
+    else if (arg === '--landscape-only') flags.renderPortrait = false;
+    else if (arg === '--portrait-only') flags.renderLandscape = false;
+  }
+  if (!flags.renderLandscape && !flags.renderPortrait) {
+    throw new Error('--landscape-only and --portrait-only are mutually exclusive.');
   }
   return flags;
 }
@@ -369,12 +389,6 @@ async function main(): Promise<void> {
     createdAt,
     outputRoot: flags.outputRoot,
   });
-  const viewport = {
-    width: initialPlan.fullEpisode.viewport.width,
-    height: initialPlan.fullEpisode.viewport.height,
-    deviceScaleFactor: initialPlan.fullEpisode.viewport.deviceScaleFactor ?? 1,
-  };
-
   // Phase 4: select shorts based on CLI flags.
   const shortsSelection = selectShorts(flags, input.authoredShorts);
   const variationsSelection = selectVariations(flags, input.variations);
@@ -443,26 +457,63 @@ async function main(): Promise<void> {
       label: string;
       shortId?: string;
       variationId?: string;
-      /**
-       * Override PGN for this job (used by variation captures, whose
-       * PGN differs from the episode's main PGN). When set, the page
-       * is opened with ?pgn=... AND ?variationId=... — the inline PGN
-       * gives the SPA the moves to play immediately; the variationId
-       * lets BroadcastView pick up the parent episode's commentator
-       * config + the variation's own lessonContext + title.
-       *
-       * Actually no — easier path: pass episodeId + variationId, let
-       * BroadcastView resolve the variation's PGN from the registry.
-       * No inline PGN needed.
-       */
+      orientation: 'landscape' | 'portrait';
       viewport: { width: number; height: number; deviceScaleFactor?: number };
       outputPath: string;
     }
+
+    // Channel content standard ([PR #54](github)): every logical video
+    // ships in BOTH landscape (1920×1080 for long-form / web) and
+    // portrait (1080×1920 for mobile / pseudo-Shorts). One PGN run per
+    // orientation. Toggle with --landscape-only / --portrait-only.
+    //
+    // Naming convention (consistent across all kinds):
+    //   <base>.mp4           landscape (no suffix)
+    //   <base>_portrait.mp4  portrait
+    //   <base>_tight.mp4     dead-air-compressed landscape sibling
+    //   <base>_portrait_tight.mp4  dead-air-compressed portrait sibling
+    const LANDSCAPE_VIEWPORT = {
+      width: 1920,
+      height: 1080,
+      deviceScaleFactor: 1,
+    };
+    const PORTRAIT_VIEWPORT = {
+      width: SHORTS_VIEWPORT.width,
+      height: SHORTS_VIEWPORT.height,
+      deviceScaleFactor: SHORTS_VIEWPORT.deviceScaleFactor ?? 1,
+    };
+
+    function withPortraitSuffix(outputPath: string): string {
+      return outputPath.replace(/\.mp4$/, '_portrait.mp4');
+    }
+    function expandOrientations(
+      base: Omit<CaptureJob, 'orientation' | 'viewport' | 'outputPath'> & { outputPath: string },
+    ): CaptureJob[] {
+      const out: CaptureJob[] = [];
+      if (flags.renderLandscape) {
+        out.push({
+          ...base,
+          orientation: 'landscape',
+          viewport: LANDSCAPE_VIEWPORT,
+          outputPath: base.outputPath,
+        });
+      }
+      if (flags.renderPortrait) {
+        out.push({
+          ...base,
+          orientation: 'portrait',
+          viewport: PORTRAIT_VIEWPORT,
+          outputPath: withPortraitSuffix(base.outputPath),
+        });
+      }
+      return out;
+    }
+
     const jobs: CaptureJob[] = [];
     if (!skipFull) {
       let outputPath = path.resolve(repoRoot, initialPlan.fullEpisode.outputPath);
       if (flags.previewDurationMs) outputPath = outputPath.replace(/\.mp4$/, '_preview.mp4');
-      jobs.push({ label: 'full', viewport, outputPath });
+      jobs.push(...expandOrientations({ label: 'full', outputPath }));
     }
     for (const clip of selectedShorts) {
       const shortTarget = shortClipToRenderTarget({
@@ -472,34 +523,28 @@ async function main(): Promise<void> {
         timing: initialPlan.timing,
         fullTimeline: initialPlan.fullEpisode.timeline,
       });
-      jobs.push({
-        label: `short:${clip.id}`,
-        shortId: clip.id,
-        viewport: {
-          width: SHORTS_VIEWPORT.width,
-          height: SHORTS_VIEWPORT.height,
-          deviceScaleFactor: SHORTS_VIEWPORT.deviceScaleFactor,
-        },
-        outputPath: path.resolve(repoRoot, shortTarget.outputPath),
-      });
+      jobs.push(
+        ...expandOrientations({
+          label: `short:${clip.id}`,
+          shortId: clip.id,
+          outputPath: path.resolve(repoRoot, shortTarget.outputPath),
+        }),
+      );
     }
     for (const variation of selectedVariations) {
-      jobs.push({
-        label: `variation:${variation.id}`,
-        variationId: variation.id,
-        viewport: {
-          width: SHORTS_VIEWPORT.width,
-          height: SHORTS_VIEWPORT.height,
-          deviceScaleFactor: SHORTS_VIEWPORT.deviceScaleFactor,
-        },
-        outputPath: path.resolve(
-          repoRoot,
-          flags.outputRoot,
-          slug,
-          'variations',
-          `${variation.id}.mp4`,
-        ),
-      });
+      jobs.push(
+        ...expandOrientations({
+          label: `variation:${variation.id}`,
+          variationId: variation.id,
+          outputPath: path.resolve(
+            repoRoot,
+            flags.outputRoot,
+            slug,
+            'variations',
+            `${variation.id}.mp4`,
+          ),
+        }),
+      );
     }
 
     const captures: Array<{
@@ -514,7 +559,9 @@ async function main(): Promise<void> {
     for (const job of jobs) {
       // Sanitize job.label for use as a Windows directory name —
       // `short:opera_game_setup` breaks mkdir because `:` is reserved.
-      const safeLabel = job.label.replace(/[:/\\?*"<>|]/g, '_');
+      // Append orientation so dual-orientation jobs get distinct dirs
+      // even if the logical label is the same.
+      const safeLabel = `${job.label}-${job.orientation}`.replace(/[:/\\?*"<>|]/g, '_');
       const frameDir = path.resolve(
         repoRoot,
         '.tmp',
@@ -525,7 +572,7 @@ async function main(): Promise<void> {
       // Ensure the job's output directory exists. Variation jobs land
       // in <slug>/variations/ which may not exist yet on first run.
       await mkdir(path.dirname(job.outputPath), { recursive: true });
-      console.log(`[export] capturing ${job.label} (${job.viewport.width}x${job.viewport.height})`);
+      console.log(`[export] capturing ${job.label} ${job.orientation} (${job.viewport.width}x${job.viewport.height})`);
       const capture = await recordBroadcastPlayback(browser, {
         serverUrl: server.url,
         episodeId: input.episodeId,
@@ -603,10 +650,13 @@ async function main(): Promise<void> {
       }
     }
 
-    // Use the FULL capture's timings (if present) for retiming. Short
-    // captures only cover a slice of the game and would produce a
-    // partial offsets map.
-    const retimeSource = captures.find((c) => c.job.label === 'full');
+    // Use the FULL landscape capture's timings (if present) for retiming.
+    // Short captures only cover a slice of the game and would produce a
+    // partial offsets map; portrait captures of the same logical content
+    // have their own timings but landscape is the canonical reference.
+    const retimeSource =
+      captures.find((c) => c.job.label === 'full' && c.job.orientation === 'landscape') ??
+      captures.find((c) => c.job.label === 'full');
     const retimedPlan = retimeSource
       ? retimeRenderPlanWithSegmentTimings(initialPlan, retimeSource.segmentTimings)
       : initialPlan;
@@ -631,6 +681,7 @@ async function main(): Promise<void> {
             label: c.job.label,
             shortId: c.job.shortId,
             variationId: c.job.variationId,
+            orientation: c.job.orientation,
             outputPath: path.relative(repoRoot, c.job.outputPath),
             tightOutputPath: c.tightOutputPath ? path.relative(repoRoot, c.tightOutputPath) : undefined,
             compressedRemovedS: c.compressedRemovedS,
