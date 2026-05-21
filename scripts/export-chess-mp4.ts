@@ -10,6 +10,12 @@
  *   npm run export:game -- --episode <id> --preview=30
  *   npm run export:game -- --episode <id> --keep-frames
  *
+ * Shorts modes:
+ *   --short=<id1,id2>      authored move-range clips (Track B)
+ *   --all-shorts           every authored short (Track B)
+ *   --variation=<id1,id2>  line-variation Shorts (Track A) — portrait 1080x1920
+ *   --all-variations       every line-variation Short for the episode
+ *
  * TTS narration in the final MP4 (Phase 3.1):
  *   Configure via a gitignored `.env` at the repo root, or via env
  *   vars in your shell — env beats .env. See `.env.example` for the
@@ -40,7 +46,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ffmpegStatic from 'ffmpeg-static';
 import { CHESS_EPISODES, DEFAULT_EPISODE_ID, getEpisode } from '../src/episodes';
-import type { EpisodeShortClip } from '../src/episodes/types';
+import type { EpisodeShortClip, VariationShort } from '../src/episodes/types';
 import {
   createRenderPlanFromPgn,
   retimeRenderPlanWithSegmentTimings,
@@ -163,6 +169,10 @@ interface CliFlags {
   shortIds: string[];
   /** When true, capture every authored short (and skip full). */
   allShorts: boolean;
+  /** When set, capture only these specific variations (and skip full). */
+  variationIds: string[];
+  /** When true, capture every line-variation Short (and skip full). */
+  allVariations: boolean;
 }
 
 function parseFlags(argv: string[]): CliFlags {
@@ -175,6 +185,8 @@ function parseFlags(argv: string[]): CliFlags {
     outputRoot: 'exports',
     shortIds: [],
     allShorts: false,
+    variationIds: [],
+    allVariations: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -199,6 +211,14 @@ function parseFlags(argv: string[]): CliFlags {
       const value = arg.slice(arg.indexOf('=') + 1);
       if (value) flags.shortIds.push(...value.split(',').map((s) => s.trim()).filter(Boolean));
     }
+    else if (arg === '--all-variations') flags.allVariations = true;
+    else if (arg === '--variation' || arg === '--variations') {
+      const value = argv[i + 1];
+      if (value) flags.variationIds.push(...value.split(',').map((s) => s.trim()).filter(Boolean));
+    } else if (arg.startsWith('--variation=') || arg.startsWith('--variations=')) {
+      const value = arg.slice(arg.indexOf('=') + 1);
+      if (value) flags.variationIds.push(...value.split(',').map((s) => s.trim()).filter(Boolean));
+    }
   }
   return flags;
 }
@@ -210,6 +230,8 @@ interface ResolvedInput {
   episodeId?: string;
   /** Authored shorts available for this input. Empty for raw-PGN inputs. */
   authoredShorts: EpisodeShortClip[];
+  /** Line-variation Shorts available for this input. Empty for raw-PGN inputs. */
+  variations: VariationShort[];
 }
 
 async function resolveInput(flags: CliFlags): Promise<ResolvedInput> {
@@ -222,6 +244,7 @@ async function resolveInput(flags: CliFlags): Promise<ResolvedInput> {
       title: base,
       slug: base.toLowerCase().replace(/[^a-z0-9_-]+/g, '-'),
       authoredShorts: [],
+      variations: [],
     };
   }
   const id = flags.episodeId ?? DEFAULT_EPISODE_ID;
@@ -244,6 +267,7 @@ async function resolveInput(flags: CliFlags): Promise<ResolvedInput> {
     slug: episode.id,
     episodeId: episode.id,
     authoredShorts: episode.exports?.shorts ?? [],
+    variations: episode.exports?.variations ?? [],
   };
 }
 
@@ -286,6 +310,45 @@ function selectShorts(
   };
 }
 
+/**
+ * Filter the variations list according to CLI flags.
+ *
+ *   --all-variations          → include every variation, skip full
+ *   --variation=<id1,id2>     → include only the named variations, skip full
+ *   (neither)                 → no variations captured
+ *
+ * Returns `{ variations, skipFull }`. Throws on unknown variation ids.
+ */
+function selectVariations(
+  flags: CliFlags,
+  available: VariationShort[],
+): { variations: VariationShort[]; skipFull: boolean } {
+  if (!flags.allVariations && flags.variationIds.length === 0) {
+    return { variations: [], skipFull: false };
+  }
+  if (available.length === 0) {
+    throw new Error(
+      '--variation / --all-variations was requested but the resolved input has no variation shorts.',
+    );
+  }
+  if (flags.allVariations) {
+    return { variations: [...available], skipFull: true };
+  }
+  const known = new Map(available.map((v) => [v.id, v]));
+  const missing = flags.variationIds.filter((id) => !known.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `--variation referenced unknown id(s): ${missing.join(', ')}. Available: ${[...known.keys()].join(
+        ', ',
+      )}`,
+    );
+  }
+  return {
+    variations: flags.variationIds.map((id) => known.get(id) as VariationShort),
+    skipFull: true,
+  };
+}
+
 async function main(): Promise<void> {
   const flags = parseFlags(process.argv.slice(2));
   const ffmpegPath = ffmpegStatic;
@@ -313,7 +376,11 @@ async function main(): Promise<void> {
   };
 
   // Phase 4: select shorts based on CLI flags.
-  const { shorts: selectedShorts, skipFull } = selectShorts(flags, input.authoredShorts);
+  const shortsSelection = selectShorts(flags, input.authoredShorts);
+  const variationsSelection = selectVariations(flags, input.variations);
+  const selectedShorts = shortsSelection.shorts;
+  const selectedVariations = variationsSelection.variations;
+  const skipFull = shortsSelection.skipFull || variationsSelection.skipFull;
 
   // Working dirs.
   const outDir = path.resolve(repoRoot, flags.outputRoot, slug);
@@ -325,8 +392,24 @@ async function main(): Promise<void> {
   );
   if (flags.fastMode) console.log('[export]   --fast (lower JPEG quality)');
   if (flags.previewDurationMs) console.log(`[export]   --preview=${flags.previewDurationMs / 1000} s`);
-  if (skipFull) console.log(`[export]   shorts mode: ${selectedShorts.map((s) => s.id).join(', ')}`);
-  else if (input.authoredShorts.length > 0) console.log(`[export]   ${input.authoredShorts.length} authored short(s) available (skipped; pass --all-shorts to include)`);
+  if (skipFull) {
+    const tags = [
+      ...selectedShorts.map((s) => `short:${s.id}`),
+      ...selectedVariations.map((v) => `variation:${v.id}`),
+    ];
+    console.log(`[export]   shorts mode: ${tags.join(', ')}`);
+  } else {
+    if (input.authoredShorts.length > 0) {
+      console.log(
+        `[export]   ${input.authoredShorts.length} authored short(s) available (skipped; pass --all-shorts to include)`,
+      );
+    }
+    if (input.variations.length > 0) {
+      console.log(
+        `[export]   ${input.variations.length} variation short(s) available (skipped; pass --all-variations to include)`,
+      );
+    }
+  }
 
   // Phase 3.1: resolve TTS config from env. Without TTS the capture
   // produces a silent MP4 and the replay speedruns (no narration gate
@@ -359,6 +442,19 @@ async function main(): Promise<void> {
     interface CaptureJob {
       label: string;
       shortId?: string;
+      variationId?: string;
+      /**
+       * Override PGN for this job (used by variation captures, whose
+       * PGN differs from the episode's main PGN). When set, the page
+       * is opened with ?pgn=... AND ?variationId=... — the inline PGN
+       * gives the SPA the moves to play immediately; the variationId
+       * lets BroadcastView pick up the parent episode's commentator
+       * config + the variation's own lessonContext + title.
+       *
+       * Actually no — easier path: pass episodeId + variationId, let
+       * BroadcastView resolve the variation's PGN from the registry.
+       * No inline PGN needed.
+       */
       viewport: { width: number; height: number; deviceScaleFactor?: number };
       outputPath: string;
     }
@@ -387,6 +483,24 @@ async function main(): Promise<void> {
         outputPath: path.resolve(repoRoot, shortTarget.outputPath),
       });
     }
+    for (const variation of selectedVariations) {
+      jobs.push({
+        label: `variation:${variation.id}`,
+        variationId: variation.id,
+        viewport: {
+          width: SHORTS_VIEWPORT.width,
+          height: SHORTS_VIEWPORT.height,
+          deviceScaleFactor: SHORTS_VIEWPORT.deviceScaleFactor,
+        },
+        outputPath: path.resolve(
+          repoRoot,
+          flags.outputRoot,
+          slug,
+          'variations',
+          `${variation.id}.mp4`,
+        ),
+      });
+    }
 
     const captures: Array<{
       job: CaptureJob;
@@ -408,12 +522,16 @@ async function main(): Promise<void> {
         `${slug}-${safeLabel}-${Date.now().toString(36)}`,
       );
       frameDirs.push(frameDir);
+      // Ensure the job's output directory exists. Variation jobs land
+      // in <slug>/variations/ which may not exist yet on first run.
+      await mkdir(path.dirname(job.outputPath), { recursive: true });
       console.log(`[export] capturing ${job.label} (${job.viewport.width}x${job.viewport.height})`);
       const capture = await recordBroadcastPlayback(browser, {
         serverUrl: server.url,
         episodeId: input.episodeId,
         rawPgn: input.episodeId ? undefined : input.pgnText,
         shortId: job.shortId,
+        variationId: job.variationId,
         frameDir,
         viewport: job.viewport,
         fastMode: flags.fastMode,
@@ -512,6 +630,7 @@ async function main(): Promise<void> {
           captures: captures.map((c) => ({
             label: c.job.label,
             shortId: c.job.shortId,
+            variationId: c.job.variationId,
             outputPath: path.relative(repoRoot, c.job.outputPath),
             tightOutputPath: c.tightOutputPath ? path.relative(repoRoot, c.tightOutputPath) : undefined,
             compressedRemovedS: c.compressedRemovedS,

@@ -24,6 +24,15 @@ export interface BroadcastConfig {
    * range; ignored entirely in Phase 1.
    */
   shortId: string | null;
+  /**
+   * Optional variation id from ?variationId=<id>. Selects one of the
+   * parent episode's `exports.variations` entries — its self-contained
+   * PGN + lessonContext + title replace the long-form lesson for this
+   * capture, while the commentator model / voice come from the parent
+   * episode. Used to produce per-variation portrait Shorts on Track A.
+   * Mutually exclusive with shortId (which slices the main PGN).
+   */
+  variationId: string | null;
   /** Optional viewport width from ?w=<px>. Defaults to 1920. */
   viewportWidth: number | null;
   /** Optional viewport height from ?h=<px>. Defaults to 1080. */
@@ -51,6 +60,7 @@ function parse(): BroadcastConfig {
       episodeId: null,
       rawPgn: null,
       shortId: null,
+      variationId: null,
       viewportWidth: null,
       viewportHeight: null,
     };
@@ -62,6 +72,7 @@ function parse(): BroadcastConfig {
     episodeId: params.get('episode'),
     rawPgn: params.get('pgn'),
     shortId: params.get('shortId'),
+    variationId: params.get('variationId'),
     viewportWidth: parsePositiveInt(params, 'w'),
     viewportHeight: parsePositiveInt(params, 'h'),
   };
