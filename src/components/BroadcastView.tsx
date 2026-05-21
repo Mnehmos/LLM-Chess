@@ -1,15 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Chess } from 'chess.js';
 import { useTournamentStore } from '../store/tournamentStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { getBroadcastConfig } from '../app/broadcastConfig';
 import { exportBridge } from '../app/exportBridge';
 import { getEpisode, DEFAULT_EPISODE_ID } from '../episodes';
+import type { MoveTangent } from '../episodes/types';
 import { TournamentProgress } from './TournamentProgress';
 import { BroadcastLayout } from './BroadcastLayout';
 import { getActiveAudioNarrationQueue, runWhenAudioNarrationQueueAvailable, type NarrationMove } from '../tts/audio-queue';
 import { createRenderPlanFromPgn, type RenderPlan } from '../production/renderPlan';
-import { parseSinglePgn } from '../pgn/parser';
-import type { BoardAnnotations } from '../utils/board-annotations';
+import { parseSinglePgn, type PgnMove } from '../pgn/parser';
+import type { BoardAnnotations, GhostArrow } from '../utils/board-annotations';
+import { GHOST_ARROW_COLORS } from '../utils/board-annotations';
 
 /**
  * BroadcastView — the chrome-free, auto-playing layout used by the
@@ -340,6 +343,27 @@ export function BroadcastView() {
   const lastMove = computeLastMove(activeGameState);
   const commentaryEntries = computeCommentaryEntries(activeGameState, commentaryLog);
   const episode = config.episodeId ? getEpisode(config.episodeId) : undefined;
+
+  // Resolve per-ply ghost arrows from the episode's moveTangents.
+  // Pure function of (pgnMoves, moveTangents) so useMemo is enough —
+  // no effect, no re-resolution mid-capture.
+  const tangentsByPly = useMemo(
+    () => resolveTangentGhostArrows(pgnMoves, episode?.moveTangents ?? []),
+    [pgnMoves, episode?.moveTangents],
+  );
+
+  // Merge ghost arrows for the currently-narrated ply into the
+  // BoardAnnotations flowing to the layout. narrationMoveIndex is
+  // 0-indexed; ply is 1-indexed (ply = narrationMoveIndex + 1).
+  // Outside narration (intro / outro) narrationMoveIndex < 0 and no
+  // ghost arrows are shown.
+  const effectiveAnnotations = useMemo<BoardAnnotations | undefined>(() => {
+    const currentGhosts = narrationMoveIndex >= 0 ? tangentsByPly.get(narrationMoveIndex + 1) : undefined;
+    if (!currentGhosts || currentGhosts.length === 0) return narrationAnnotations;
+    const base: BoardAnnotations = narrationAnnotations ?? { arrows: [], highlights: [], circles: [] };
+    return { ...base, ghostArrows: currentGhosts };
+  }, [narrationAnnotations, narrationMoveIndex, tangentsByPly]);
+
   return (
     <>
       <div style={{ position: 'fixed', top: -10000, left: 0, width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' }} aria-hidden>
@@ -362,12 +386,54 @@ export function BroadcastView() {
         lastMove={lastMove}
         narrationMoveIndex={narrationMoveIndex}
         narrationSquares={narrationSquares}
-        narrationAnnotations={narrationAnnotations}
+        narrationAnnotations={effectiveAnnotations}
         narrationArrows={narrationArrows}
         pgnMoves={pgnMoves}
       />
     </>
   );
+}
+
+/**
+ * Resolve each tangent's SAN against the board position BEFORE its
+ * ply was played, returning a Map<ply, GhostArrow[]> for fast lookup
+ * during render. Invalid tangents (unparseable SAN, ply out of range)
+ * are silently dropped — they're authored content, the smoke capture
+ * is the QA loop.
+ */
+function resolveTangentGhostArrows(
+  pgnMoves: PgnMove[],
+  tangents: MoveTangent[],
+): Map<number, GhostArrow[]> {
+  const byPly = new Map<number, GhostArrow[]>();
+  for (const t of tangents) {
+    if (t.ply < 1 || t.ply > pgnMoves.length) continue;
+    // FEN BEFORE the move at this ply: starting position if ply 1,
+    // otherwise PgnMove.fen of the previous ply (which is the FEN
+    // AFTER the previous move = BEFORE the current move).
+    const fenBefore = t.ply === 1
+      ? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+      : pgnMoves[t.ply - 2]?.fen;
+    if (!fenBefore) continue;
+    try {
+      const chess = new Chess(fenBefore);
+      const move = chess.move(t.san);
+      if (!move) continue;
+      const arrow: GhostArrow = {
+        from: move.from,
+        to: move.to,
+        color: GHOST_ARROW_COLORS[t.category],
+        category: t.category,
+        san: t.san,
+      };
+      const existing = byPly.get(t.ply);
+      if (existing) existing.push(arrow);
+      else byPly.set(t.ply, [arrow]);
+    } catch {
+      // Bad SAN — drop silently. Author's bug, surfaces in QA.
+    }
+  }
+  return byPly;
 }
 
 function computeLastMove(gameState: import('../engine/types').GameState | null): { from: string; to: string } | undefined {

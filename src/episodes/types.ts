@@ -57,10 +57,79 @@ export interface Episode {
    * set the lesson context use the teacher prompt builder instead.
    */
   historicalContext?: string;
+  /**
+   * The opening's BOOK STANDARD — what each side is trying to achieve,
+   * what counts as a successful opening for each color, and the
+   * principles that "hold the line" (i.e. the moves and ideas considered
+   * mainstream good play). Track A only.
+   *
+   * Read into the lesson commentator's system prompt and stated near
+   * the top of the lesson so the viewer knows the WIN CONDITION the
+   * opening targets before move-by-move teaching begins.
+   *
+   * Example: "Ruy Lopez book standard — White: develop, pin the c6
+   * knight, hold the long Spanish bishop diagonal, play c3/d4 at the
+   * right moment. Black: free the position with ...a6/...b5/...d6,
+   * solve the c8-bishop, time the ...c5 break. Each side wants a
+   * playable middlegame with their own structural priorities intact."
+   */
+  bookStandard?: string;
+  /**
+   * Per-move tangents — ALTERNATIVE moves the lesson can teach about
+   * (typically blunders or sub-variations) WITHOUT actually playing
+   * them on the board. The board renders these as ghosted arrows
+   * during the narration of the relevant ply, so the viewer sees
+   * "what could have happened" while the lesson stays on the main line.
+   * Track A only.
+   *
+   * The commentator's prompt for each move surfaces the matching
+   * tangents so it can weave them into narration ("If Black plays Nf6
+   * here, that's a typical student mistake because…").
+   */
+  moveTangents?: MoveTangent[];
   /** Export configuration. Present once the episode is planned for export. */
   exports?: EpisodeExportConfig;
   /** Published references (e.g. YouTube URLs). Workspace-tracked. */
   published?: EpisodePublishedRef[];
+}
+
+/**
+ * A per-move ALTERNATIVE move shown as a ghost arrow on the board while
+ * the lesson narrates the main move. Doesn't replay the line — the
+ * board stays on the main PGN, but the alternative move is rendered
+ * with a translucent / dashed arrow so the viewer sees what was
+ * considered.
+ *
+ * `category` drives the arrow's styling so different kinds of
+ * alternatives are visually distinguishable.
+ */
+export interface MoveTangent {
+  /**
+   * Which move in the main PGN this tangent applies to. 1-indexed ply
+   * counter: 1 = White's first move, 2 = Black's first move, etc.
+   * The tangent shows on the board while THIS move's commentary plays.
+   */
+  ply: number;
+  /**
+   * The alternative move in SAN (e.g. "Nf6"). Resolved at render time
+   * to from/to squares against the board's position just BEFORE the
+   * main move at this ply was played.
+   */
+  san: string;
+  /**
+   * Category — drives the ghost arrow's color / style:
+   *   'student_mistake'    — common club-level error
+   *   'move_order_trap'    — looks fine but loses to a known trap
+   *   'engine_refutation'  — natural-looking move that engines refute
+   *   'historical_blunder' — a real-game blunder by a named player
+   */
+  category: 'student_mistake' | 'move_order_trap' | 'engine_refutation' | 'historical_blunder';
+  /**
+   * One-line teaching note for the commentator. Read into the prompt
+   * for this ply so the LLM can mention the tangent ("if Black plays X
+   * here, that's because <note>").
+   */
+  note: string;
 }
 
 /** Provenance of the PGN that backs the Episode. */
