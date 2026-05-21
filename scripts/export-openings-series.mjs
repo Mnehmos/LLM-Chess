@@ -61,12 +61,16 @@ async function log(msg) {
 function runNpmExport(args, logPath) {
   return new Promise(async (resolve) => {
     const fileHandle = logPath;
-    // npm.cmd on Windows, npm elsewhere.
-    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const child = spawn(npmCmd, ['run', 'export:game', '--', ...args], {
+    // Direct npm.cmd spawn fails with EINVAL on Windows Node 22 — the
+    // shim is a batch file, and Node's spawn refuses to execute .cmd
+    // without going through a shell. shell:true delegates to cmd.exe,
+    // which knows how to resolve npm.cmd from PATH. Args are all
+    // alphanumeric + dashes so the shell quoting risk is minimal.
+    const child = spawn('npm', ['run', 'export:game', '--', ...args], {
       cwd: repoRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      shell: true,
     });
     const onData = (chunk) => {
       // Append to per-job log. Don't block on disk; if it throws, just skip.
