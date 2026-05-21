@@ -8,6 +8,7 @@ import { TournamentProgress } from './TournamentProgress';
 import { BroadcastLayout } from './BroadcastLayout';
 import { getActiveAudioNarrationQueue, runWhenAudioNarrationQueueAvailable, type NarrationMove } from '../tts/audio-queue';
 import { createRenderPlanFromPgn, type RenderPlan } from '../production/renderPlan';
+import { parseSinglePgn } from '../pgn/parser';
 import type { BoardAnnotations } from '../utils/board-annotations';
 
 /**
@@ -44,6 +45,19 @@ export function BroadcastView() {
   const [loadError] = useState<string | null>(() => resolvePgnSource(config).error);
   const [historicalContext] = useState<string | undefined>(() => resolvePgnSource(config).historicalContext);
   const [episodeCommentatorModel] = useState<string | null>(() => resolvePgnSource(config).commentatorModel);
+  // Pre-parsed PGN moves. BroadcastLayout uses these to look up per-ply
+  // FEN / from / to, because the runtime's eventLog only contains
+  // MoveApplied events for moves the replay actually emits — not the
+  // priorMoveHistory it fast-forwards through for short captures.
+  const [pgnMoves] = useState<import('../pgn/parser').PgnMove[]>(() => {
+    try {
+      const source = resolvePgnSource(config).pgnText;
+      if (!source) return [];
+      return parseSinglePgn(source).moves;
+    } catch {
+      return [];
+    }
+  });
   // Phase 4: resolve a short's ply range when ?shortId= is set. null
   // means "play the full game" (full-episode capture).
   const [shortRange] = useState<{ startPly: number; endPly: number; clipId: string } | null>(
@@ -335,6 +349,7 @@ export function BroadcastView() {
         narrationSquares={narrationSquares}
         narrationAnnotations={narrationAnnotations}
         narrationArrows={narrationArrows}
+        pgnMoves={pgnMoves}
       />
     </>
   );

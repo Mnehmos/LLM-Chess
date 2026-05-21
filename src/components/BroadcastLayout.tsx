@@ -21,7 +21,7 @@ import { Board } from './Board';
 import type { CommentaryEntry } from '../commentary/commentaryQueue';
 import type { NarrationMove } from '../tts/audio-queue';
 import type { BoardAnnotations } from '../utils/board-annotations';
-import type { GameEvent } from '../engine/events';
+import type { PgnMove } from '../pgn/parser';
 
 interface BroadcastLayoutProps {
   gameState: GameState;
@@ -55,44 +55,46 @@ interface BroadcastLayoutProps {
   narrationAnnotations?: BoardAnnotations;
   /** Move arrows for the currently-narrated move. */
   narrationArrows: NarrationMove[];
+  /**
+   * Parsed PGN moves indexed by ply, supplied by BroadcastView. The
+   * authoritative source for `fen` / `from` / `to` per ply, regardless
+   * of how the runtime's eventLog is populated (in replay mode the
+   * eventLog only covers replayed moves, NOT priorMoveHistory, so
+   * looking up FENs by eventLog index is incorrect).
+   */
+  pgnMoves: PgnMove[];
 }
 
 /**
  * Resolve the move whose narration is currently playing. When
- * narrationMoveIndex >= 0, the displayed board should reflect the
- * position AFTER that ply — even if the runtime has already advanced
- * to a later move.
+ * narrationMoveIndex >= 0, the displayed board reflects the position
+ * AFTER that ply — even if the runtime has already advanced.
+ *
+ * Looks up FEN + from + to directly from the parsed PGN moves array,
+ * which has correct per-ply data regardless of replay vs live mode.
+ * (The runtime's eventLog only stores MoveApplied for replay moves,
+ * not for priorMoveHistory, so eventLog-by-index lookups break for
+ * short captures that fast-forward past a startPly.)
  */
 function narratedMoveInfo(
   gameState: GameState,
   narrationMoveIndex: number,
+  pgnMoves: PgnMove[],
 ): { san: string; turnNumber: number; color: 'w' | 'b'; fen: string; from?: string; to?: string } | null {
-  const idx = narrationMoveIndex >= 0
-    ? Math.min(narrationMoveIndex, gameState.moveHistory.length - 1)
-    : gameState.moveHistory.length - 1;
-  if (idx < 0) return null;
+  const cap = Math.min(gameState.moveHistory.length - 1, pgnMoves.length - 1);
+  if (cap < 0) return null;
+  const idx = narrationMoveIndex >= 0 ? Math.min(narrationMoveIndex, cap) : cap;
   const move = gameState.moveHistory[idx];
-  if (!move) return null;
-  // Find the MoveApplied event for this ply to recover its FEN +
-  // from/to. The eventLog stores them in order; the Nth MoveApplied
-  // corresponds to move index N.
-  let seen = 0;
-  for (const event of gameState.eventLog) {
-    if (event.type !== 'MoveApplied') continue;
-    if (seen === idx) {
-      const ev = event as Extract<GameEvent, { type: 'MoveApplied' }>;
-      return {
-        san: move.move,
-        turnNumber: move.turnNumber,
-        color: move.color,
-        fen: ev.payload.fen,
-        from: ev.payload.from,
-        to: ev.payload.to,
-      };
-    }
-    seen++;
-  }
-  return { san: move.move, turnNumber: move.turnNumber, color: move.color, fen: gameState.fen };
+  const pgnMove = pgnMoves[idx];
+  if (!move || !pgnMove) return null;
+  return {
+    san: move.move,
+    turnNumber: move.turnNumber,
+    color: move.color,
+    fen: pgnMove.fen,
+    from: pgnMove.from,
+    to: pgnMove.to,
+  };
 }
 
 export function BroadcastLayout({
@@ -108,6 +110,7 @@ export function BroadcastLayout({
   narrationSquares,
   narrationAnnotations,
   narrationArrows,
+  pgnMoves,
 }: BroadcastLayoutProps) {
   // The displayed board tracks the narrated move, not the runtime's
   // latest. When narrationMoveIndex is -1 (no narration yet), fall
@@ -116,7 +119,7 @@ export function BroadcastLayout({
   // panel in sync (we don't list moves the narrator hasn't reached).
   const effectiveMoveIndex = narrationMoveIndex >= 0 ? narrationMoveIndex : gameState.moveHistory.length - 1;
   const displayedMoveHistory = gameState.moveHistory.slice(0, Math.max(0, effectiveMoveIndex + 1));
-  const narratedInfo = narratedMoveInfo(gameState, narrationMoveIndex);
+  const narratedInfo = narratedMoveInfo(gameState, narrationMoveIndex, pgnMoves);
   const displayedFen = narratedInfo?.fen ?? gameState.fen;
   const displayedLastMove =
     narratedInfo && narratedInfo.from && narratedInfo.to
