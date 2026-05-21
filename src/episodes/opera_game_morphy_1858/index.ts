@@ -6,6 +6,7 @@ import { OPERA_GAME_EXPORT } from './exports';
 
 export const OPERA_GAME_EPISODE: Episode = {
   id: 'opera_game_morphy_1858',
+  track: 'historical',
   title: 'The Opera Game — Morphy vs Brunswick and Isouard, 1858',
   summary:
     'Paul Morphy beats two consulting aristocrats in 17 moves at the Paris Opera, finishing with the queen sacrifice and rook mate that has been taught to chess students for the next 168 years.',

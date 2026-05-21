@@ -302,6 +302,8 @@ export class CommentaryQueue {
   private recentFillerTexts: string[] = [];
   /** True while the puzzle break panel is open — prevents double-firing on repeated audio drain callbacks. */
   private puzzleBreakActive = false;
+  /** Once true, no further filler or puzzle scheduling fires for this queue's lifetime. */
+  private fillerLockedOut = false;
   /** Snapshot of the last move for filler context. */
   private lastMoveSnapshot: QueuedMove | null = null;
   /** Timestamp when the last move snapshot was recorded (used to compute thinking elapsed time). */
@@ -958,8 +960,22 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
     this.fillerActive = false;
   }
 
+  /**
+   * One-way switch that disables ALL future filler/puzzle scheduling
+   * and cancels any in-flight filler. Called from the broadcast
+   * post-game sequence right before the futures + outro segments —
+   * once we're in "closing" mode, no stray filler clips should
+   * appear after the brand sign-off.
+   *
+   * Idempotent. Cannot be undone (re-create the queue instead).
+   */
+  lockOutFillers(): void {
+    this.fillerLockedOut = true;
+    this.cancelFiller();
+  }
+
   private scheduleFillerRecheck(ms: number): void {
-    if (this.destroyed || this.fillerTimer) return;
+    if (this.destroyed || this.fillerLockedOut || this.fillerTimer) return;
     this.fillerTimer = setTimeout(() => {
       this.fillerTimer = null;
       this.scheduleFillerIfIdle();
@@ -967,7 +983,7 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
   }
 
   private scheduleFillerIfIdle(): void {
-    if (this.destroyed) return;
+    if (this.destroyed || this.fillerLockedOut) return;
     if (this.pending.length > 0 || this.active !== null) return;
     if (!this.lastMoveSnapshot) return; // No game context yet
     if (this.puzzleBreakActive || (this.config.getPuzzleBreakActive?.() ?? false)) return; // Puzzle break already open
@@ -1010,7 +1026,7 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
   }
 
   private async runFiller(): Promise<void> {
-    if (this.destroyed || this.pending.length > 0 || this.active !== null) return;
+    if (this.destroyed || this.fillerLockedOut || this.pending.length > 0 || this.active !== null) return;
     if (this.fillerActive) return;
     if (this.puzzleBreakActive || (this.config.getPuzzleBreakActive?.() ?? false)) return;
 

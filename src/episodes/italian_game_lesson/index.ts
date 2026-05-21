@@ -1,6 +1,8 @@
 import type { Episode } from '../types';
 import { ITALIAN_GAME_LESSON_PGN } from './pgn';
 import { ITALIAN_GAME_LESSON_COMMENTATOR } from './commentator';
+import { ITALIAN_GAME_VARIATIONS } from './variations';
+import { ITALIAN_GAME_EXPORT } from './exports';
 
 /**
  * The Italian Game — opening lesson.
@@ -15,15 +17,19 @@ import { ITALIAN_GAME_LESSON_COMMENTATOR } from './commentator';
  */
 export const ITALIAN_GAME_LESSON_EPISODE: Episode = {
   id: 'italian_game_lesson',
+  track: 'lesson',
   title: 'AI Teaches the Italian Game',
   summary:
     'An AI walks through the Italian Game (Giuoco Piano main line), playing both sides of a 12-move demonstration and explaining each idea in real time.',
   source: 'agent_generated',
   pgn: ITALIAN_GAME_LESSON_PGN,
   commentator: ITALIAN_GAME_LESSON_COMMENTATOR,
+  exports: ITALIAN_GAME_EXPORT,
 };
 
 export {
   ITALIAN_GAME_LESSON_PGN,
   ITALIAN_GAME_LESSON_COMMENTATOR,
+  ITALIAN_GAME_VARIATIONS,
+  ITALIAN_GAME_EXPORT,
 };

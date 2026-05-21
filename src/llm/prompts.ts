@@ -610,6 +610,96 @@ export function buildBroadcastOutroPrompt(spec: BroadcastIntroSpec): string {
 Do NOT spell out a URL — the channel link is in the description. Do NOT use list formatting or markdown. Do NOT mention "the outro", "the video", or "the audience". Just deliver the content.`;
 }
 
+interface BroadcastFuturesSpec {
+  /** Episode / lesson / match title. */
+  title: string;
+  kind: BroadcastFormatKind;
+  /**
+   * Names of line-variation Shorts that accompany this lesson.
+   * Only set for Track A lessons; ignored for historical / match.
+   * The futures block name-checks these so viewers know what to
+   * watch next.
+   */
+  variationTitles?: string[];
+  /**
+   * For Track B (historical): a one-sentence pointer to what the
+   * game went on to influence or how the position fits into chess
+   * history. Used in place of variation tease.
+   */
+  historicalLegacyBlurb?: string;
+}
+
+/**
+ * Build the prompt for the FINAL POSITION + FUTURES segment that runs
+ * AFTER the last move's commentary and BEFORE the outro.
+ *
+ * Two job descriptions, picked by track:
+ *   - 'lesson':     Explain the final position in plain language (what
+ *                   each side has achieved, what the pawn structure
+ *                   says about the next 10 moves), then tee up the
+ *                   line-variation Shorts by name. This is the natural
+ *                   bridge to the Track A variation cluster.
+ *   - 'historical': Explain the final position and briefly say how the
+ *                   game's ideas echoed forward — what later players
+ *                   took from this, why the game survives in books.
+ *   - 'match':      Explain the final position and reflect on each
+ *                   model's decision-making patterns under verifiable
+ *                   constraint (no future tease).
+ *
+ * The outro that follows must be the LAST audio in the video, so this
+ * block has to be self-contained and end without a hand-off cue
+ * (no "and that brings us to..."). The store inserts the outro after
+ * narration of this block fully drains.
+ */
+export function buildBroadcastFuturesPrompt(spec: BroadcastFuturesSpec): string {
+  const positionTask = `Explain the FINAL POSITION on the board in plain language. What has each side actually achieved? What does the pawn structure suggest about the next phase of the game? Keep it concrete — name pieces and squares.`;
+
+  if (spec.kind === 'lesson') {
+    const variationLines = (spec.variationTitles ?? []).map((t) => `  • ${t}`).join('\n');
+    const teaseSection = spec.variationTitles && spec.variationTitles.length > 0
+      ? `Then tee up where the lesson goes next. From this position, the same opening branches into a handful of named variations — each one a different idea worth its own short video. Name them out loud (do not bullet-list, just speak them):
+${variationLines}
+Frame the variations as "if you want to see [name], that's its own short" — natural, conversational, NOT a sales pitch.`
+      : `Then tee up where the lesson goes next from this opening — what alternative lines a viewer might explore. Keep it natural and conversational.`;
+
+    return `Write the FINAL-POSITION + FUTURES segment for this Oracle Trust Calibration lesson. Four to six sentences, spoken aloud, in the same teacher voice you have been using.
+
+Part 1 — Final position:
+${positionTask}
+
+Part 2 — Futures:
+${teaseSection}
+
+Do NOT sign off here — the outro follows separately. Do NOT use markdown or list formatting. Do NOT mention "the video" or "the audience".`;
+  }
+
+  if (spec.kind === 'historical') {
+    const legacy = spec.historicalLegacyBlurb
+      ? `Then reflect briefly on how this game echoed forward. ${spec.historicalLegacyBlurb}`
+      : `Then reflect briefly on what later players took from this game and why it has survived in books.`;
+    return `Write the FINAL-POSITION + LEGACY segment for this Oracle Trust Calibration historical replay. Four to six sentences, in the same historian's voice you have been using.
+
+Part 1 — Final position:
+${positionTask}
+
+Part 2 — Legacy:
+${legacy}
+
+Do NOT sign off here — the outro follows separately. Do NOT use markdown or list formatting. Do NOT mention "the video" or "the audience".`;
+  }
+
+  // match
+  return `Write the FINAL-POSITION + REFLECTION segment for this Oracle Trust Calibration match. Four to six sentences, spoken aloud, in the same voice you have been using.
+
+Part 1 — Final position:
+${positionTask}
+
+Part 2 — Reflection:
+Reflect on what the two models' decisions showed about how they handle a verifiable, recoverable test bed. What did one model see that the other missed? What does that say about reasoning under unreliable context (the Oracle Trust Calibration angle)?
+
+Do NOT sign off here — the outro follows separately. Do NOT use markdown or list formatting. Do NOT mention "the video" or "the audience".`;
+}
+
 /**
  * Build a commentary system prompt for historical game replay.
  * Prepends historical context to the standard commentator prompt so the LLM
