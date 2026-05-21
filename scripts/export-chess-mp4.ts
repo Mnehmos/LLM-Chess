@@ -55,6 +55,7 @@ import {
 } from './lib/export/browserCapture';
 import { startViteServer } from './lib/export/devServer';
 import { composeMp4 } from './lib/export/ffmpegCompose';
+import { compressDeadAir } from './lib/export/compressDeadAir';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..');
@@ -393,6 +394,8 @@ async function main(): Promise<void> {
       durationMs: number;
       frameCount: number;
       audioBytes: number;
+      tightOutputPath?: string;
+      compressedRemovedS: number;
     }> = [];
     for (const job of jobs) {
       // Sanitize job.label for use as a Windows directory name —
@@ -437,14 +440,49 @@ async function main(): Promise<void> {
         ffmpegPath,
         audioPath,
       });
+
+      // Dead-air compression. The narration recording is full of
+      // multi-second silences between moves (the commentator LLM is
+      // generating the next move's text while the previous TTS clip
+      // has already finished). Detecting + trimming those silences
+      // typically cuts 30-50% off the video duration without losing
+      // any narrated content. Only runs when there's an audio track
+      // to analyze — silent MP4s pass through unchanged.
+      let tightOutputPath: string | undefined;
+      let compressedRemovedS = 0;
+      if (audioPath && audioBytes > 0) {
+        tightOutputPath = job.outputPath.replace(/\.mp4$/, '_tight.mp4');
+        try {
+          const result = await compressDeadAir({
+            inputPath: job.outputPath,
+            outputPath: tightOutputPath,
+            ffmpegPath,
+          });
+          compressedRemovedS = result.removedS;
+          console.log(
+            `[dead-air] ${path.basename(job.outputPath)}: ${result.inputDurationS.toFixed(1)}s → ${result.outputDurationS.toFixed(1)}s (removed ${result.removedS.toFixed(1)}s, ${result.silenceRanges.length} silence ranges)`,
+          );
+        } catch (err) {
+          console.warn(
+            `[dead-air] compression failed for ${path.basename(job.outputPath)}: ${err instanceof Error ? err.message : String(err)}. The uncompressed MP4 is still usable.`,
+          );
+          tightOutputPath = undefined;
+        }
+      }
+
       captures.push({
         job,
         segmentTimings: capture.segmentTimings,
         durationMs: capture.durationMs,
         frameCount: capture.frameCount,
         audioBytes,
+        tightOutputPath,
+        compressedRemovedS,
       });
       console.log(`[export] wrote ${path.relative(repoRoot, job.outputPath)}`);
+      if (tightOutputPath) {
+        console.log(`[export] wrote ${path.relative(repoRoot, tightOutputPath)} (dead air removed)`);
+      }
     }
 
     // Use the FULL capture's timings (if present) for retiming. Short
@@ -475,6 +513,8 @@ async function main(): Promise<void> {
             label: c.job.label,
             shortId: c.job.shortId,
             outputPath: path.relative(repoRoot, c.job.outputPath),
+            tightOutputPath: c.tightOutputPath ? path.relative(repoRoot, c.tightOutputPath) : undefined,
+            compressedRemovedS: c.compressedRemovedS,
             viewport: c.job.viewport,
             frameCount: c.frameCount,
             durationMs: c.durationMs,

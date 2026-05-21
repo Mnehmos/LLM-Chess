@@ -150,7 +150,7 @@ interface TournamentStore {
   resumeGame: (matchIndex: number, pairIndex: number, slotIndex: 0 | 1) => void;
 
   // Replay actions
-  startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number; startFromPly?: number }) => void;
+  startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean }) => void;
   stopReplay: () => void;
 
   // Multi-tournament actions
@@ -635,7 +635,7 @@ export const useTournamentStore = create<TournamentStore>()(
 
       // --- Replay actions ---
 
-      startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number; startFromPly?: number }) => {
+      startReplay: (pgn: string, config: { historicalContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean }) => {
         const { activeRuntime } = get();
         if (activeRuntime) {
           activeRuntime.abort('Starting replay');
@@ -713,9 +713,29 @@ export const useTournamentStore = create<TournamentStore>()(
           useTournamentStore.setState({ streamingText: text, streamingModel: model });
         });
 
-        // No gate needed — moves fire with a simple delay (like LLM think time),
-        // commentary + TTS run async in the background at their own pace.
-        // Board display follows narration via effectiveMoveIndex (same as tournament).
+        // Pace control. The default replay path uses moveDelayMs and
+        // lets commentary + TTS run async — which works for the live
+        // UX where the user can watch the board while narration catches
+        // up. The MP4 export pipeline needs the OPPOSITE: each move
+        // must wait for the previous narration to finish playing AND
+        // for the next move's commentary to be generated, so the
+        // captured video stays synced to the narration audio.
+        //
+        // When paceWithNarration is set, install a replayPaceCheck
+        // that drains both queues between moves. The runtime awaits
+        // this before emitting each MoveApplied event (except the very
+        // first; we add a short pre-roll for the opener's commentary
+        // separately).
+        if (config.paceWithNarration) {
+          runtime.setReplayPaceCheck(async () => {
+            if (_commentaryQueue) {
+              try { await _commentaryQueue.waitUntilIdle(); } catch { /* commentary failure shouldn't block replay */ }
+            }
+            if (_waitForNarration) {
+              try { await _waitForNarration(); } catch { /* same */ }
+            }
+          });
+        }
 
         runtime.subscribe((state: GameState, event: GameEvent) => {
           useTournamentStore.setState({ activeGameState: state });

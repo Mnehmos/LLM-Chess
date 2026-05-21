@@ -78,8 +78,18 @@ export class FrameSequenceWriter {
     const sorted = [...this.buffer].sort((a, b) => a.receivedMs - b.receivedMs);
 
     const frameCount = Math.max(1, Math.round((captureDurationMs / 1000) * this.frameRate));
+
+    // Batched writes. Promise.all over 8000+ files at once exhausts
+    // the Windows file-descriptor limit (EMFILE). 128 in flight at
+    // a time keeps disk throughput high without saturating the FD pool.
+    const CONCURRENCY = 128;
     let cursor = 0; // index into `sorted` of the current "active" frame
     const writes: Promise<void>[] = [];
+    const flushBatch = async (): Promise<void> => {
+      if (writes.length === 0) return;
+      await Promise.all(writes);
+      writes.length = 0;
+    };
     for (let i = 0; i < frameCount; i++) {
       const slotMs = i * this.intervalMs;
       // Advance the cursor to the latest frame whose timestamp <= slotMs.
@@ -89,8 +99,9 @@ export class FrameSequenceWriter {
       const frame = sorted[cursor];
       const file = path.join(this.frameDir, `frame_${String(i).padStart(8, '0')}.jpg`);
       writes.push(writeFile(file, frame.data));
+      if (writes.length >= CONCURRENCY) await flushBatch();
     }
-    await Promise.all(writes);
+    await flushBatch();
     return frameCount;
   }
 }

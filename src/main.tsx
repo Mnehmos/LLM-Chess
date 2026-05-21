@@ -16,8 +16,10 @@ installExportBridge(broadcastConfig.exportMode);
 // App.tsx) keeps App's hook order stable for the normal SPA case.
 const Root = broadcastConfig.exportMode ? BroadcastView : App;
 
+// StrictMode is wrapped only for the normal SPA. In broadcast mode it
+// double-mounts CommentaryPanel, which throws away the AudioNarrationQueue
+// instance our MediaRecorder is attached to and silently produces an
+// empty audio track in the final MP4.
 createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <Root />
-  </StrictMode>,
+  broadcastConfig.exportMode ? <Root /> : <StrictMode><Root /></StrictMode>,
 )
