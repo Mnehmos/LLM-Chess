@@ -6,7 +6,7 @@ import { exportBridge } from '../app/exportBridge';
 import { getEpisode, DEFAULT_EPISODE_ID } from '../episodes';
 import { TournamentProgress } from './TournamentProgress';
 import { BroadcastLayout } from './BroadcastLayout';
-import { getActiveAudioNarrationQueue } from '../tts/audio-queue';
+import { getActiveAudioNarrationQueue, runWhenAudioNarrationQueueAvailable } from '../tts/audio-queue';
 import { createRenderPlanFromPgn, type RenderPlan } from '../production/renderPlan';
 
 /**
@@ -66,13 +66,18 @@ export function BroadcastView() {
         id: '',
         name: '',
         mode: 'llm' as const,
-        reasoningEffort: 'high' as const,
-        maxTokens: 16000,
         stockfishDepth: 18,
       }),
       id: episodeCommentatorModel,
       name: episodeCommentatorModel,
       mode: 'llm',
+      // Video-friendly defaults. The SPA's default for replay is
+      // reasoning_effort: 'high' + 16000 tokens, which produces 30-
+      // 130s LLM calls and 3-6 minute TTS narrations per move —
+      // overkill for a video clip. Medium + 1500 tokens gives
+      // ~5-15s commentary blocks, narratable in 15-30 seconds.
+      reasoningEffort: 'medium',
+      maxTokens: 1500,
     });
   }, [episodeCommentatorModel, setReplayCommentatorModel]);
 
@@ -94,6 +99,20 @@ export function BroadcastView() {
         }
         startedRef.current = true;
 
+        // Phase 3.1 diagnostic: emit the SPA's effective settings
+        // at start() so the capture log proves whether the seeded
+        // localStorage actually hydrated into the settings store.
+        // Both TTS and LLM-commentator settings matter — without the
+        // commentator key, CommentaryQueue silently fails to produce
+        // text and no audio plays even when TTS is enabled.
+        const settings = useSettingsStore.getState();
+        console.log(
+          `[broadcast] tts: enabled=${settings.ttsEnabled} provider=${settings.ttsProvider} hasCloudKey=${Boolean(settings.ttsCloudApiKey)} voice=${settings.ttsCloudVoice}`,
+        );
+        console.log(
+          `[broadcast] llm: provider=${settings.provider} hasKey=${Boolean(settings.apiKey)} keyLen=${settings.apiKey?.length ?? 0}`,
+        );
+
         const config = getBroadcastConfig();
         const plan: RenderPlan = createRenderPlanFromPgn({
           id: config.episodeId ?? 'inline-pgn',
@@ -104,26 +123,32 @@ export function BroadcastView() {
         });
         exportBridge.__setRenderPlan(plan);
 
-        const audioQueue = getActiveAudioNarrationQueue();
-        if (audioQueue) {
-          audioQueue.markPlaybackStart(performance.now());
+        // Race-safe queue hooks: CommentaryPanel mounts AFTER
+        // startReplay flips replayMode, so the AudioNarrationQueue
+        // doesn't exist yet at this moment. runWhenAvailable fires
+        // the callback immediately if a queue is registered, OR as
+        // soon as register() is next called. Either way, the
+        // MediaRecorder is attached to the SAME instance that plays
+        // the narration audio.
+        const playbackStartedAt = performance.now();
+        runWhenAudioNarrationQueueAvailable((audioQueue) => {
+          console.log('[broadcast] attaching MediaRecorder + segment-start callback to audio queue');
+          audioQueue.markPlaybackStart(playbackStartedAt);
           audioQueue.setSegmentStartCallback((moveIndex, offsetMs) => {
             exportBridge.__recordSegmentTiming(moveIndex, offsetMs);
           });
-          // Phase 3.1: tap the queue's gain node via MediaRecorder
-          // so the capture pipeline can mux the rendered narration
-          // into the final MP4. No-op when TTS is disabled (queue
-          // never plays anything).
           audioQueue.startRecording();
-        } else {
-          console.warn(
-            '[BroadcastView] No active AudioNarrationQueue at start() — segment timings will not be recorded',
-          );
-        }
+        });
 
         startReplay(pgnText, {
           historicalContext,
-          moveDelayMs: 0,
+          // Broadcast mode: each move waits on commentary + narration
+          // before the next fires (paceWithNarration). A small
+          // moveDelayMs gives the FIRST move's commentary time to
+          // start streaming before the second move fires — the pace
+          // check only runs from move 2 onward.
+          moveDelayMs: 2000,
+          paceWithNarration: true,
           startFromPly: shortRange?.startPly ?? 0,
         });
       },

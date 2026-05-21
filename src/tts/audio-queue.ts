@@ -527,26 +527,54 @@ function stripMarkdownForTts(text: string): string {
 // ─── Active-queue registry (broadcast mode) ─────────────────────────
 //
 // CommentaryPanel creates an AudioNarrationQueue per session. The
-// MP4-export pipeline (BroadcastView in Phase 1, scripts/lib/export in
-// Phase 3) needs to reach the currently-active queue to call
-// markPlaybackStart() and setSegmentStartCallback(). Following the
-// existing registerCommentaryQueue pattern in tournamentStore, expose
-// a module-level slot. Outside broadcast mode this slot is set but
-// nobody reads it.
+// MP4-export pipeline needs to reach the active queue to call
+// markPlaybackStart() / setSegmentStartCallback() / startRecording().
+//
+// Race: bridge.start() fires BEFORE startReplay flips replayMode, so
+// TournamentProgress hasn't rendered CommentaryPanel yet → the queue
+// isn't registered yet. To handle this, the registry supports
+// "pending hooks": callers can `runWhenAudioNarrationQueueAvailable(fn)`
+// and the fn runs either immediately (queue exists) or when register
+// is next called.
 
 let activeAudioNarrationQueue: AudioNarrationQueue | null = null;
+const pendingHooks: ((queue: AudioNarrationQueue) => void)[] = [];
 
 /**
  * Register the audio narration queue currently driving playback. Called
  * by CommentaryPanel on mount. Unregister with null on unmount.
+ * Pending hooks queued via runWhenAudioNarrationQueueAvailable fire
+ * on the first non-null register since they were added.
  */
 export function registerAudioNarrationQueue(queue: AudioNarrationQueue | null): void {
   activeAudioNarrationQueue = queue;
+  if (queue && pendingHooks.length > 0) {
+    const hooks = pendingHooks.splice(0, pendingHooks.length);
+    for (const hook of hooks) {
+      try { hook(queue); } catch (err) { console.warn('[AudioQueue] pending hook failed:', err); }
+    }
+  }
 }
 
 /** Returns the active audio narration queue, if any. */
 export function getActiveAudioNarrationQueue(): AudioNarrationQueue | null {
   return activeAudioNarrationQueue;
+}
+
+/**
+ * Run `fn` against the active audio queue — immediately if one is
+ * already registered, otherwise as soon as the next register() call
+ * lands. Used by the MP4 broadcast bridge to install
+ * markPlaybackStart + startRecording the moment CommentaryPanel
+ * mounts, even when bridge.start() fires before TournamentProgress
+ * has flipped to replay mode.
+ */
+export function runWhenAudioNarrationQueueAvailable(fn: (queue: AudioNarrationQueue) => void): void {
+  if (activeAudioNarrationQueue) {
+    fn(activeAudioNarrationQueue);
+    return;
+  }
+  pendingHooks.push(fn);
 }
 
 /**

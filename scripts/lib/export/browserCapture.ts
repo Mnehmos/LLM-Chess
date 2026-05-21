@@ -114,8 +114,24 @@ export async function recordBroadcastPlayback(browser: Browser, options: Capture
   const page = await context.newPage();
   const consoleEntries: BrowserConsoleEntry[] = [];
   page.on('console', (message) => {
+    const text = message.text();
     if (message.type() === 'error' || message.type() === 'warning') {
-      consoleEntries.push({ type: message.type(), text: message.text() });
+      consoleEntries.push({ type: message.type(), text });
+    }
+    // Surface broadcast-specific diagnostics to the export stdout so
+    // a silent capture is debuggable without re-running with Playwright
+    // in non-headless mode. Filter narrowly so we don't pull in
+    // unrelated Vite HMR noise.
+    if (
+      text.startsWith('[broadcast]')
+      || text.startsWith('[seed]')
+      || text.startsWith('[__CHESS_EXPORT__]')
+      || text.startsWith('[Commentary]')
+      || text.startsWith('[Replay]')
+      || text.startsWith('[TTS')
+      || text.startsWith('[OpenAI]')
+    ) {
+      console.log(`[page] ${text}`);
     }
   });
   page.on('pageerror', (error) => {
@@ -219,6 +235,24 @@ export async function recordBroadcastPlayback(browser: Browser, options: Capture
  * via the migrate function on first hydrate.
  */
 function seedTtsSettingsScript(tts: TtsExportConfig): string {
+  // OpenAI's API key serves double duty in this project: TTS synthesis
+  // AND the commentary LLM. For headless captures we ALWAYS seed both:
+  // commentary generation runs through `apiKey` / `providerKeys`, and
+  // its output is what gets handed to TTS. Without the LLM key, the
+  // CommentaryQueue silently fails to produce text, no audio plays,
+  // and the replay races to the end with paceWithNarration unable to
+  // catch anything to wait on.
+  //
+  // Qwen-cloud and local providers don't double for LLM duty; we leave
+  // the LLM provider/key empty in those cases (commentary won't run
+  // and the audio output will be silent — that's the user's choice).
+  const seedLlmFields = tts.provider === 'openai' && tts.apiKey
+    ? {
+        provider: 'openai',
+        apiKey: tts.apiKey,
+        providerKeys: { openrouter: '', openai: tts.apiKey },
+      }
+    : {};
   const payload = {
     state: {
       ttsEnabled: true,
@@ -228,6 +262,7 @@ function seedTtsSettingsScript(tts: TtsExportConfig): string {
       ttsVoice: tts.voice ?? 'default',
       ttsVolume: tts.volume ?? 0.8,
       ttsPort: tts.port ?? 9877,
+      ...seedLlmFields,
     },
     version: 8,
   };
@@ -250,16 +285,17 @@ function seedTtsSettingsScript(tts: TtsExportConfig): string {
               version: incoming.version,
             };
             localStorage.setItem(KEY, JSON.stringify(merged));
+            console.log('[seed] merged into existing settings (ttsEnabled=' + merged.state.ttsEnabled + ', provider=' + merged.state.ttsProvider + ', hasKey=' + Boolean(merged.state.ttsCloudApiKey) + ')');
           } catch (_e) {
             localStorage.setItem(KEY, JSON.stringify(incoming));
+            console.log('[seed] wrote fresh settings after parse error (ttsEnabled=' + incoming.state.ttsEnabled + ')');
           }
         } else {
           localStorage.setItem(KEY, JSON.stringify(incoming));
+          console.log('[seed] wrote fresh settings (ttsEnabled=' + incoming.state.ttsEnabled + ', provider=' + incoming.state.ttsProvider + ', hasKey=' + Boolean(incoming.state.ttsCloudApiKey) + ')');
         }
-      } catch (_e) {
-        // localStorage may be unavailable (private mode, etc.); the
-        // SPA falls back to its schema defaults (TTS off) and the
-        // capture pipeline will warn about no audio.
+      } catch (e) {
+        console.log('[seed] error: ' + (e && e.message));
       }
     })();
   `;
