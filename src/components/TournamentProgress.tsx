@@ -11,7 +11,8 @@ import { downloadSingleGamePGN } from '../utils/export';
 import { downloadSingleGameJSON } from '../utils/export';
 import { CommentaryQueue, type CommentaryEntry } from '../commentary/commentaryQueue';
 import { createLLMClient } from '../llm/client';
-import { getHistoricalCommentatorPrompt, getLessonCommentatorPrompt, buildPuzzleBreakIntroPrompt, buildPuzzleSetupPromptWithOracle, buildPuzzleCommentaryTurnPromptWithOracle, buildPuzzleOutroPromptWithOracle } from '../llm/prompts';
+import { getHistoricalCommentatorPrompt, getLessonCommentatorPrompt, buildBroadcastIntroPrompt, buildPuzzleBreakIntroPrompt, buildPuzzleSetupPromptWithOracle, buildPuzzleCommentaryTurnPromptWithOracle, buildPuzzleOutroPromptWithOracle } from '../llm/prompts';
+import { isBroadcastMode } from '../app/broadcastConfig';
 import { runResilientTextGeneration } from '../llm/resilient-text';
 import { fetchLichessPuzzle, getPuzzleFamilyId, prefillPuzzlePool, type LichessPuzzle, type PuzzleTurn } from '../commentary/puzzleBreak';
 import { parseAnnotations, EMPTY_ANNOTATIONS, parsePuzzleMoves, hasAnnotations, mergeAnnotations, type BoardAnnotations } from '../utils/board-annotations';
@@ -464,7 +465,36 @@ export function TournamentProgress() {
           : null;
         let introPrompt: string;
         let boardSetupPrompt: string | null = null;
-        if (replayMode && replayHistoricalContext) {
+        // Broadcast mode (MP4 export): use the standardized Oracle
+        // Trust Calibration intro for every video — historical,
+        // lesson, or AI-vs-AI. This replaces the per-mode intro
+        // prompts below and ensures every export has consistent
+        // brand framing.
+        if (isBroadcastMode()) {
+          const broadcastTitle =
+            replayMode && activeGameState.white.displayName && activeGameState.black.displayName
+              ? `${activeGameState.white.displayName} vs ${activeGameState.black.displayName}`
+              : 'this match';
+          const kind: 'historical' | 'lesson' | 'match' = useTournamentStore.getState().replayLessonContext
+            ? 'lesson'
+            : replayMode && replayHistoricalContext
+              ? 'historical'
+              : 'match';
+          const episodeBlurb =
+            kind === 'lesson'
+              ? useTournamentStore.getState().replayLessonContext?.split('.')[0]
+              : kind === 'historical'
+                ? replayHistoricalContext?.split('.')[0]
+                : openingLabel ?? undefined;
+          introPrompt = buildBroadcastIntroPrompt({
+            title: broadcastTitle,
+            kind,
+            episodeBlurb: episodeBlurb || undefined,
+          });
+          // No separate boardSetupPrompt in broadcast mode — the
+          // standardized intro carries the format framing in one
+          // entry so the brand line stays tight.
+        } else if (replayMode && replayHistoricalContext) {
           // Historical replay with context
           introPrompt = `You are about to narrate a famous historical chess game. ${replayHistoricalContext}\n\nSet the stage for the audience in 2-3 sentences. Build anticipation.`;
           if (priorPly === 0) {
