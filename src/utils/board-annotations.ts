@@ -42,6 +42,25 @@ export interface BoardAnnotations {
   arrows: AnnotationArrow[];
   highlights: AnnotationHighlight[];
   circles: AnnotationCircle[];
+  /**
+   * Optional ghost (alternative) arrows — moves the lesson DIDN'T play
+   * but is currently discussing (typical blunder, engine refutation,
+   * move-order trap). Rendered as dashed + low-opacity arrows so they
+   * read as "what could have happened" rather than the actual move.
+   * Authored per-episode via Episode.moveTangents; not produced by
+   * commentary parsing.
+   */
+  ghostArrows?: GhostArrow[];
+}
+
+/**
+ * A ghost arrow with a category that drives its styling. See
+ * MoveTangent in src/episodes/types.ts for the data model.
+ */
+export interface GhostArrow extends AnnotationArrow {
+  category: 'student_mistake' | 'move_order_trap' | 'engine_refutation' | 'historical_blunder';
+  /** SAN of the move being ghosted, used for hover/debug labelling. */
+  san?: string;
 }
 
 export type SemanticCueKind =
@@ -77,7 +96,15 @@ export interface AnnotationParseOptions {
   includePassiveSquares?: boolean;
 }
 
-export const EMPTY_ANNOTATIONS: BoardAnnotations = { arrows: [], highlights: [], circles: [] };
+export const EMPTY_ANNOTATIONS: BoardAnnotations = { arrows: [], highlights: [], circles: [], ghostArrows: [] };
+
+/** Standard color per ghost-arrow category. */
+export const GHOST_ARROW_COLORS: Record<GhostArrow['category'], string> = {
+  student_mistake: 'rgba(255, 23, 68, 0.55)',     // red — typical club error
+  move_order_trap: 'rgba(255, 145, 0, 0.55)',     // orange — trap line
+  engine_refutation: 'rgba(0, 229, 255, 0.55)',   // cyan — computer refutation
+  historical_blunder: 'rgba(180, 130, 255, 0.55)',// purple — historical reference
+};
 
 const TAG_PATTERN = /\[(?:arrow|highlight|circle|move)\s+[^\]]+\]/gi;
 const RESIDUAL_TAG_PATTERN = /\[\/?(?:arrow|highlight|circle|move)\b[^\]]*\]/gi;

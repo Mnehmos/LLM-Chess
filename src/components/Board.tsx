@@ -64,12 +64,25 @@ function AnnotationOverlay({
 
   const hasContent =
     moveArrows.length > 0 ||
-    (annotations && (annotations.arrows.length > 0 || annotations.highlights.length > 0 || annotations.circles.length > 0));
+    (annotations &&
+      (annotations.arrows.length > 0 ||
+        annotations.highlights.length > 0 ||
+        annotations.circles.length > 0 ||
+        (annotations.ghostArrows?.length ?? 0) > 0));
 
   if (!hasContent) return null;
 
-  // Collect all arrows: move arrows first, then model annotations
-  const allArrows: { from: string; to: string; stroke: string; opacity: number; width: number; key: string }[] = [];
+  // Collect all arrows: move arrows first, then model annotations,
+  // then ghost arrows (with dashed styling).
+  const allArrows: {
+    from: string;
+    to: string;
+    stroke: string;
+    opacity: number;
+    width: number;
+    dashed?: boolean;
+    key: string;
+  }[] = [];
 
   // Move arrows (player-colored, thicker)
   for (let i = 0; i < moveArrows.length; i++) {
@@ -96,6 +109,24 @@ function AnnotationOverlay({
         opacity: 0.85,
         width: 4,
         key: `anno-arrow-${a.from}-${a.to}-${i}`,
+      });
+    }
+  }
+
+  // Ghost arrows — alternatives the lesson is DISCUSSING but not
+  // playing. Dashed + lower opacity so they read as "what could have
+  // happened" rather than the actual move.
+  if (annotations?.ghostArrows) {
+    for (let i = 0; i < annotations.ghostArrows.length; i++) {
+      const a = annotations.ghostArrows[i];
+      allArrows.push({
+        from: a.from,
+        to: a.to,
+        stroke: a.color,
+        opacity: 0.5,
+        width: 3,
+        dashed: true,
+        key: `ghost-arrow-${a.from}-${a.to}-${i}`,
       });
     }
   }
@@ -184,6 +215,7 @@ function AnnotationOverlay({
             stroke={arrow.stroke}
             strokeWidth={arrow.width}
             strokeLinecap="round"
+            strokeDasharray={arrow.dashed ? '6 5' : undefined}
             markerEnd={`url(#${markerId}-${arrow.stroke})`}
             opacity={arrow.opacity}
           />
