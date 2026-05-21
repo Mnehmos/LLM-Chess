@@ -285,13 +285,18 @@ export function Board({ fen, lastMove, highlightSquares, arrows, annotations }: 
               const annoColor = annoHighlightMap.get(square);
 
               // Priority: annotation highlight > narration highlight > lastMove
+              // Saturation is bumped (from ~25% alpha previously to ~70%
+              // on dark squares, ~85% on light) so the highlights read
+              // cleanly on mobile and survive YouTube re-encoding.
               let bgStyle: React.CSSProperties | undefined;
               if (annoColor) {
                 bgStyle = { backgroundColor: annoColor };
               } else if (isNarrationHighlight) {
-                bgStyle = { backgroundColor: isLight ? '#fde68a' : '#f59e0b60' };
+                // amber — current-focus square called out in narration
+                bgStyle = { backgroundColor: isLight ? '#fcd34d' : '#f59e0bcc' };
               } else if (isLastMove) {
-                bgStyle = { backgroundColor: isLight ? '#c4b5fd' : '#7c3aed80' };
+                // purple — last move played
+                bgStyle = { backgroundColor: isLight ? '#a78bfa' : '#7c3aedcc' };
               }
 
               return (
@@ -300,9 +305,9 @@ export function Board({ fen, lastMove, highlightSquares, arrows, annotations }: 
                   className={`
                     w-12 h-12 flex items-center justify-center text-3xl select-none relative transition-colors duration-300
                     ${isLight ? 'bg-board-light' : 'bg-board-dark'}
-                    ${isNarrationHighlight && !annoColor ? 'ring-2 ring-inset ring-amber-400' : ''}
-                    ${!isNarrationHighlight && !annoColor && isLastMove ? 'ring-2 ring-inset ring-purple-accent' : ''}
-                    ${isCheck ? 'ring-2 ring-inset ring-error' : ''}
+                    ${isNarrationHighlight && !annoColor ? 'ring-4 ring-inset ring-amber-400' : ''}
+                    ${!isNarrationHighlight && !annoColor && isLastMove ? 'ring-4 ring-inset ring-purple-accent' : ''}
+                    ${isCheck ? 'ring-4 ring-inset ring-error' : ''}
                   `}
                   style={bgStyle}
                 >

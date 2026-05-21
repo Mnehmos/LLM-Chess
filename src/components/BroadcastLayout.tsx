@@ -276,13 +276,14 @@ function FullLayout({
         <div className="text-xl text-text-secondary font-mono">{moveCounterText}</div>
       </header>
 
-      {/* Main split: board left, commentary + moves right */}
+      {/* Main split: board left, commentary + moves right.
+          Board column gets ~1290 px (1920 - 540 sidebar - margins);
+          board scales to ~1075 px (zoom 2.8). Bigger board for
+          better mobile-rotation readability and survives YouTube's
+          re-encode of board square detail. */}
       <main className="flex-1 flex min-h-0">
-        {/* Board column — fills available height. CSS zoom scales the
-            384 px board up to ~922 px while keeping pixel-perfect
-            chess geometry. */}
-        <section className="flex-1 flex flex-col items-center justify-center px-10 min-w-0">
-          <div style={{ zoom: 2.4 }}>
+        <section className="flex-1 flex flex-col items-center justify-center px-6 min-w-0">
+          <div style={{ zoom: 2.8 }}>
             <Board
               fen={displayedFen}
               lastMove={lastMove}
@@ -291,11 +292,13 @@ function FullLayout({
               annotations={narrationAnnotations}
             />
           </div>
-          <EvalBar pct={evalPct} label={evalLabel} className="mt-4 w-[600px]" />
+          <EvalBar pct={evalPct} label={evalLabel} className="mt-4 w-[680px]" />
         </section>
 
-        {/* Right sidebar — commentary + recent moves */}
-        <aside className="w-[680px] border-l border-surface-2 flex flex-col min-h-0 px-8 py-6 gap-6 shrink-0">
+        {/* Right sidebar — commentary + recent moves. 540 px keeps
+            the impact-card caption readable without crowding the
+            board. */}
+        <aside className="w-[540px] border-l border-surface-2 flex flex-col min-h-0 px-6 py-6 gap-6 shrink-0">
           <CommentaryPanel text={liveCaption} large />
           <RecentMovesPanel moves={recentMoves} />
         </aside>
@@ -363,11 +366,52 @@ function ShortLayout({
   );
 }
 
+/**
+ * Impact-card caption.
+ *
+ * The narration is already sentence-segmented by the audio queue —
+ * activeNarrationText is the SINGLE sentence currently being spoken.
+ * The card styling makes that sentence read as one claim per beat:
+ * large text, generous padding, soft gradient backdrop, drop shadow,
+ * center-aligned. Reads cleanly on mobile and survives YouTube's
+ * re-encode without smearing because of the high-contrast text.
+ *
+ *   extraLarge → portrait (1080×1920), text-4xl / 5xl
+ *   large      → landscape (1920×1080), text-3xl
+ */
 function CommentaryPanel({ text, large, extraLarge }: { text: string; large?: boolean; extraLarge?: boolean }) {
-  const size = extraLarge ? 'text-3xl leading-snug' : large ? 'text-xl leading-relaxed' : 'text-base leading-normal';
+  const size = extraLarge
+    ? 'text-5xl leading-tight'
+    : large
+      ? 'text-3xl leading-snug'
+      : 'text-base leading-normal';
+  const padding = extraLarge ? 'px-10 py-8' : large ? 'px-8 py-6' : 'px-4 py-3';
+  if (!text) {
+    return (
+      <div className={`flex items-center justify-center h-full ${padding}`}>
+        <span className="text-text-muted italic text-lg">Commentary will appear here…</span>
+      </div>
+    );
+  }
   return (
-    <div className={`text-text-primary ${size} font-medium`}>
-      {text || <span className="text-text-muted italic">Commentary will appear here…</span>}
+    <div className={`flex items-center justify-center h-full ${padding}`}>
+      <div
+        className={`
+          ${size}
+          font-semibold text-text-primary text-center
+          rounded-2xl
+          bg-gradient-to-br from-surface-1/90 to-surface-2/90
+          ring-1 ring-surface-3/60
+          shadow-2xl
+          ${extraLarge ? 'px-10 py-8' : 'px-8 py-6'}
+          max-w-full
+        `}
+        style={{
+          textShadow: '0 2px 8px rgba(0,0,0,0.6)',
+        }}
+      >
+        {text}
+      </div>
     </div>
   );
 }
