@@ -66,9 +66,14 @@ interface BroadcastLayoutProps {
 }
 
 /**
- * Resolve the move whose narration is currently playing. When
- * narrationMoveIndex >= 0, the displayed board reflects the position
- * AFTER that ply — even if the runtime has already advanced.
+ * Resolve the move whose narration is currently playing.
+ *
+ *  - narrationMoveIndex >= 0: return the parsed PGN ply at that index.
+ *    The displayed board reflects the position AFTER that ply.
+ *  - narrationMoveIndex == -1 (intro is playing, or no narration has
+ *    started yet): return null. The caller falls back to the STARTING
+ *    position from GameCreated.initialFen — not the runtime's latest
+ *    move, which has raced ahead during async intro generation.
  *
  * Looks up FEN + from + to directly from the parsed PGN moves array,
  * which has correct per-ply data regardless of replay vs live mode.
@@ -81,9 +86,10 @@ function narratedMoveInfo(
   narrationMoveIndex: number,
   pgnMoves: PgnMove[],
 ): { san: string; turnNumber: number; color: 'w' | 'b'; fen: string; from?: string; to?: string } | null {
+  if (narrationMoveIndex < 0) return null;
   const cap = Math.min(gameState.moveHistory.length - 1, pgnMoves.length - 1);
   if (cap < 0) return null;
-  const idx = narrationMoveIndex >= 0 ? Math.min(narrationMoveIndex, cap) : cap;
+  const idx = Math.min(narrationMoveIndex, cap);
   const move = gameState.moveHistory[idx];
   const pgnMove = pgnMoves[idx];
   if (!move || !pgnMove) return null;
@@ -95,6 +101,21 @@ function narratedMoveInfo(
     from: pgnMove.from,
     to: pgnMove.to,
   };
+}
+
+/**
+ * The position before any replay move has been narrated — i.e. what
+ * the viewer should see during the intro. Pulled from the GameCreated
+ * event's initialFen so it's correct for both full-game and
+ * short-with-startPly captures.
+ */
+function startingFenFor(gameState: GameState): string | null {
+  for (const event of gameState.eventLog) {
+    if (event.type === 'GameCreated') {
+      return event.payload.initialFen;
+    }
+  }
+  return null;
 }
 
 export function BroadcastLayout({
@@ -112,19 +133,26 @@ export function BroadcastLayout({
   narrationArrows,
   pgnMoves,
 }: BroadcastLayoutProps) {
-  // The displayed board tracks the narrated move, not the runtime's
-  // latest. When narrationMoveIndex is -1 (no narration yet), fall
-  // back to the latest applied move. Truncating the displayed move
-  // history to narrationMoveIndex+1 also keeps the "recent moves"
-  // panel in sync (we don't list moves the narrator hasn't reached).
-  const effectiveMoveIndex = narrationMoveIndex >= 0 ? narrationMoveIndex : gameState.moveHistory.length - 1;
-  const displayedMoveHistory = gameState.moveHistory.slice(0, Math.max(0, effectiveMoveIndex + 1));
+  // The displayed board tracks the NARRATED move, not the runtime's
+  // latest. During the intro (narrationMoveIndex < 0), the runtime
+  // can race ahead by several plies while the intro audio plays;
+  // showing the runtime's current position would put the board past
+  // moves the narrator hasn't reached. Fall back to the STARTING
+  // position from GameCreated.initialFen instead — both for the
+  // displayed FEN and for the recent-moves panel (empty during intro).
   const narratedInfo = narratedMoveInfo(gameState, narrationMoveIndex, pgnMoves);
-  const displayedFen = narratedInfo?.fen ?? gameState.fen;
+  const startingFen = startingFenFor(gameState);
+  const displayedFen = narratedInfo?.fen ?? startingFen ?? gameState.fen;
   const displayedLastMove =
     narratedInfo && narratedInfo.from && narratedInfo.to
       ? { from: narratedInfo.from, to: narratedInfo.to }
-      : lastMove;
+      : narratedInfo
+        ? lastMove
+        : undefined; // intro: no last-move highlight, the board is the opening position
+  const effectiveMoveIndex = narratedInfo ? narrationMoveIndex : -1;
+  const displayedMoveHistory = effectiveMoveIndex >= 0
+    ? gameState.moveHistory.slice(0, effectiveMoveIndex + 1)
+    : [];
 
   const recentMoves = useMemo(() => {
     // Last 6 plies of the DISPLAYED history (not the runtime's).
@@ -143,9 +171,11 @@ export function BroadcastLayout({
     return pairs;
   }, [displayedMoveHistory]);
 
+  // Neutral counter during intro (no specific move narrated yet) so
+  // the badge doesn't lie about which move the viewer is on.
   const moveCounterText = narratedInfo
     ? `Move ${narratedInfo.turnNumber}${narratedInfo.color === 'b' ? '…' : ''} · ${narratedInfo.san}`
-    : 'Move 1';
+    : 'Opening';
 
   // Eval bar percentage. Clamps centipawns to ±500 then maps to 0..100%
   // of white's lead. Mate is treated as the full bar.
