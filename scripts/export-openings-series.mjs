@@ -25,6 +25,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, appendFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const EPISODES = [
   'italian_game_lesson',
@@ -34,7 +35,7 @@ const EPISODES = [
   'qgd_orthodox_lesson',
 ];
 
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Z]:)/, '$1'), '..');
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const logRoot = path.join(repoRoot, 'exports', '_batch-logs');
 
 function stamp() {

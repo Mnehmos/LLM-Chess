@@ -402,7 +402,7 @@ async function main(): Promise<void> {
 
   console.log(`[export] ${input.title}`);
   console.log(
-    `[export]   ${initialPlan.fullEpisode.timeline.length} segments, planned ${(initialPlan.fullEpisode.range.endMs / 1000).toFixed(1)} s, viewport ${viewport.width}x${viewport.height}`,
+    `[export]   ${initialPlan.fullEpisode.timeline.length} segments, planned ${(initialPlan.fullEpisode.range.endMs / 1000).toFixed(1)} s`,
   );
   if (flags.fastMode) console.log('[export]   --fast (lower JPEG quality)');
   if (flags.previewDurationMs) console.log(`[export]   --preview=${flags.previewDurationMs / 1000} s`);
