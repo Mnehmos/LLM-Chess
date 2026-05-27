@@ -99,6 +99,35 @@ export interface Episode {
    * what the standard capture produces.
    */
   whiteboardScenes?: WhiteboardScene[];
+  /**
+   * Chapter markers — divide the lesson into named segments. Drives
+   * the chapter header in the multi-modal broadcast layout and the
+   * scoping of `keyIdeas` / `whatToWatch` / `funFacts` panels.
+   *
+   * Optional. Episodes without chapters render in the legacy
+   * single-panel layout (no chapter bar, no key-ideas panel).
+   */
+  chapters?: EpisodeChapter[];
+  /**
+   * Persistent "key ideas" panel content. Each `KeyIdeasBlock` is
+   * scoped to a chapter (by `chapterPly`) and shows 3-5 bullet points
+   * while that chapter is active.
+   *
+   * No bullets shown for chapters without a matching block.
+   */
+  keyIdeas?: KeyIdeasBlock[];
+  /**
+   * Persistent "what to watch" panel — one short paragraph per
+   * chapter giving the viewer strategic guidance for what to focus
+   * on during that segment.
+   */
+  whatToWatch?: WhatToWatchBlock[];
+  /**
+   * Optional rotating "fun fact" strip — historical asides, theory
+   * trivia, or quotes. Rotated through during the lesson; no chapter
+   * scoping (facts can show whenever).
+   */
+  funFacts?: FunFact[];
   /** Export configuration. Present once the episode is planned for export. */
   exports?: EpisodeExportConfig;
   /** Published references (e.g. YouTube URLs). Workspace-tracked. */
@@ -236,6 +265,65 @@ export interface WhiteboardArrowDiagramScene extends WhiteboardSceneBase {
   arrows: Array<{ from: string; to: string; label?: string; color?: string }>;
   /** Optional caption below the diagram. */
   caption?: string;
+}
+
+/**
+ * A chapter marker — divides the lesson into named segments. The
+ * chapter is "active" from `ply` until the next chapter's `ply`
+ * (or end of episode).
+ *
+ * The chapter header appears at the top of the multi-modal layout
+ * showing the chapter number + title + subtitle. Chapter changes
+ * trigger updates to the keyIdeas / whatToWatch panels.
+ */
+export interface EpisodeChapter {
+  /** 1-indexed ply this chapter starts at. 0 = before any move (intro). */
+  ply: number;
+  /** Short chapter title, e.g. "The Italian Setup". */
+  title: string;
+  /** One-line subtitle / description, e.g. "Both sides develop classically". */
+  subtitle?: string;
+}
+
+/**
+ * A block of key-idea bullets scoped to a specific chapter. Renders
+ * in the "Key ideas" sidebar while the matched chapter is active.
+ */
+export interface KeyIdeasBlock {
+  /** Must match an EpisodeChapter.ply to scope this block to that chapter. */
+  chapterPly: number;
+  /** 3-5 short bullets, each ~10-15 words. */
+  ideas: string[];
+}
+
+/**
+ * Strategic guidance shown in the "What to watch" panel during a
+ * chapter. One short paragraph; the viewer focus prompt for that
+ * segment.
+ */
+export interface WhatToWatchBlock {
+  /** Must match an EpisodeChapter.ply. */
+  chapterPly: number;
+  /** One paragraph (3-5 sentences) of strategic guidance. */
+  text: string;
+}
+
+/**
+ * A rotating fun-fact — historical asides, theory trivia, or quotes.
+ * Optionally scoped to a ply range; unscoped facts show anywhere.
+ *
+ * Rotated through during the lesson; one fact visible at a time in
+ * the funFacts strip (or panel) for ~20s before rotating to the next.
+ */
+export interface FunFact {
+  /** Short label / category, e.g. "Historical", "Theory", "Quote". */
+  label?: string;
+  /** Fact text — 1-2 sentences, ~25 words max for readability. */
+  text: string;
+  /** Earliest ply this fact can show. Default 0 (always available). */
+  minPly?: number;
+  /** Latest ply this fact can show. Default Infinity (always available). */
+  maxPly?: number;
 }
 
 /** Provenance of the PGN that backs the Episode. */
