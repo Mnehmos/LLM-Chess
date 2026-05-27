@@ -33,6 +33,13 @@ export interface BroadcastConfig {
    * Mutually exclusive with shortId (which slices the main PGN).
    */
   variationId: string | null;
+  /**
+   * Enable whiteboard scenes from ?whiteboard=1. When true, episodes
+   * with authored `whiteboardScenes` will render those scenes as
+   * full-frame overlays at the matching plies. Default off — same
+   * episode renders cleanly with or without scenes.
+   */
+  whiteboard: boolean;
   /** Optional viewport width from ?w=<px>. Defaults to 1920. */
   viewportWidth: number | null;
   /** Optional viewport height from ?h=<px>. Defaults to 1080. */
@@ -61,6 +68,7 @@ function parse(): BroadcastConfig {
       rawPgn: null,
       shortId: null,
       variationId: null,
+      whiteboard: false,
       viewportWidth: null,
       viewportHeight: null,
     };
@@ -73,6 +81,7 @@ function parse(): BroadcastConfig {
     rawPgn: params.get('pgn'),
     shortId: params.get('shortId'),
     variationId: params.get('variationId'),
+    whiteboard: parseFlag(params, 'whiteboard'),
     viewportWidth: parsePositiveInt(params, 'w'),
     viewportHeight: parsePositiveInt(params, 'h'),
   };

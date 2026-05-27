@@ -8,6 +8,7 @@ import { getEpisode, DEFAULT_EPISODE_ID } from '../episodes';
 import type { MoveTangent } from '../episodes/types';
 import { TournamentProgress } from './TournamentProgress';
 import { BroadcastLayout } from './BroadcastLayout';
+import { WhiteboardOverlay } from './WhiteboardOverlay';
 import { getActiveAudioNarrationQueue, runWhenAudioNarrationQueueAvailable, type NarrationMove } from '../tts/audio-queue';
 import { createRenderPlanFromPgn, type RenderPlan } from '../production/renderPlan';
 import { parseSinglePgn, type PgnMove } from '../pgn/parser';
@@ -316,6 +317,29 @@ export function BroadcastView() {
     return { ...base, ghostArrows: currentGhosts };
   }, [narrationAnnotations, narrationMoveIndex, tangentsByPly]);
 
+  // Whiteboard scene resolution. Gated by ?whiteboard=1 URL flag —
+  // when off, no scenes render regardless of episode authoring. When
+  // on, the scene whose `ply` matches the current narration ply is
+  // active and renders as a full-frame overlay.
+  //
+  // Scene timing: ply N's scene plays AFTER move N's commentary but
+  // BEFORE move N+1's commentary. For v1 the trigger is simply
+  // "narrationMoveIndex equals scene.ply - 1" — i.e. while the
+  // narration is on move N, scene at ply N is overlaid. Refinement
+  // for future PRs: dedicated narration cues so the scene only shows
+  // for its authored duration mid-move, not for the whole ply.
+  const whiteboardSceneByPly = useMemo(() => {
+    if (!config.whiteboard) return new Map<number, import('../episodes/types').WhiteboardScene>();
+    const scenes = episode?.whiteboardScenes ?? [];
+    const map = new Map<number, import('../episodes/types').WhiteboardScene>();
+    for (const scene of scenes) map.set(scene.ply, scene);
+    return map;
+  }, [config.whiteboard, episode?.whiteboardScenes]);
+  const activeWhiteboardScene = useMemo(() => {
+    if (narrationMoveIndex < 0) return undefined;
+    return whiteboardSceneByPly.get(narrationMoveIndex + 1);
+  }, [whiteboardSceneByPly, narrationMoveIndex]);
+
   if (loadError) {
     return (
       <div className="min-h-screen bg-surface-0 flex items-center justify-center">
@@ -390,6 +414,11 @@ export function BroadcastView() {
         narrationArrows={narrationArrows}
         pgnMoves={pgnMoves}
       />
+      {/* Whiteboard overlay — full-frame scene that takes over the
+          board area when an authored scene matches the current
+          narration ply. Above BroadcastLayout in z-order. Gated by
+          ?whiteboard=1 (already applied in whiteboardSceneByPly). */}
+      {activeWhiteboardScene && <WhiteboardOverlay scene={activeWhiteboardScene} />}
     </>
   );
 }
