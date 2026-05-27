@@ -15,8 +15,16 @@ import { registerPid } from './processRegistry';
 import { FrameSequenceWriter } from './frameSequenceWriter';
 
 const DEFAULT_FRAME_RATE = 30;
-const SCREENCAST_QUALITY_DEFAULT = 84;
-const SCREENCAST_QUALITY_FAST = 60;
+// JPEG quality for the CDP screencast frames. Higher = more source
+// detail for the H.264 encoder downstream. We're encoding 1080p
+// text-heavy content (board lines, captions, move list) where JPEG
+// chroma subsampling artifacts smear edges; quality 92 keeps those
+// edges crisp before the encoder ever sees them. Frame files are
+// ~20% bigger than at q84 but that's not a bottleneck.
+const SCREENCAST_QUALITY_DEFAULT = 92;
+// Fast mode (--fast flag) — lower quality for iteration speed. The
+// final upload should never use this.
+const SCREENCAST_QUALITY_FAST = 70;
 const EXPORT_READY_TIMEOUT_MS = 180_000;
 const CAPTURE_POSTROLL_MS = 500;
 
