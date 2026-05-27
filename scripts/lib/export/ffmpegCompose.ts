@@ -34,34 +34,48 @@ export interface ComposeOptions {
 
 /**
  * Upload-grade H.264 encoder args, shared between the compose pass and
- * the dead-air re-encode. The previous CRF-20 / veryfast setup
- * produced 0.1–0.5 Mbps streams for mostly-static board content, which
- * smeared text and thin board lines once YouTube re-encoded them.
+ * the dead-air re-encode.
  *
- * Target: 1080p text-heavy content that survives one round of YouTube
- * transcode without breaking down. Both landscape (1920×1080) and
- * portrait (1080×1920) carry ~2M pixels per frame, so the same target
- * bitrate works for both.
+ * History:
+ *   v1 (PR #59): -b:v 8M -maxrate 10M -bufsize 16M with -tune stillimage
+ *                Produced ~500 kb/s in practice — the `stillimage` tune
+ *                tells x264 the source is screenshot-grade and triggers
+ *                hyper-aggressive psy-rd / aq settings, causing ABR
+ *                mode to massively undershoot the 8 Mbps target.
  *
- *   -b:v 8M -maxrate 10M -bufsize 16M  8 Mbps target with headroom
- *   -preset slow                       better compression at same bitrate
- *                                      (trades encode time for quality)
- *   -tune stillimage                   x264 mode optimized for static
- *                                      text/diagram content
- *   -profile:v high -level 4.1         standard 1080p H.264 profile
- *   -pix_fmt yuv420p                   QuickTime / browser compat
- *   -movflags +faststart               metadata at file head for streaming
+ *   v2 (this):   -crf 16 with VBV ceiling, no tune.
+ *                CRF mode targets visual quality directly. CRF 16 is
+ *                "visually transparent" — x264 produces whatever
+ *                bitrate is needed to maintain that fidelity. For
+ *                1080p text-heavy chess content this typically lands
+ *                in the 3-6 Mbps range — high enough to survive
+ *                YouTube re-encoding without smearing.
+ *
+ * Settings:
+ *   -crf 16              visually transparent quality target
+ *   -maxrate 12M         VBV ceiling — won't peak above this
+ *   -bufsize 24M         2x maxrate buffer for steady decoding
+ *   -preset slow         better compression efficiency at the
+ *                        same quality (trades encode time)
+ *   -profile:v high -level 4.1   standard 1080p H.264 profile
+ *   -pix_fmt yuv420p     QuickTime / browser compat
+ *   -movflags +faststart metadata at file head for streaming
+ *
+ * No -tune. The board has enough motion (caption updates, eval bar
+ * shifts, recent-moves panel changes, fun-fact rotation) that
+ * `stillimage` is the wrong assumption. `animation` would also work
+ * (sparse-color, sharp edges) but the default psy settings produce
+ * crisp text reliably.
  */
 const VIDEO_ENCODE_ARGS = [
   '-c:v', 'libx264',
   '-preset', 'slow',
-  '-tune', 'stillimage',
   '-profile:v', 'high',
   '-level', '4.1',
   '-pix_fmt', 'yuv420p',
-  '-b:v', '8M',
-  '-maxrate', '10M',
-  '-bufsize', '16M',
+  '-crf', '16',
+  '-maxrate', '12M',
+  '-bufsize', '24M',
   '-movflags', '+faststart',
 ];
 
