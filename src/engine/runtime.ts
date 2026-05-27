@@ -12,6 +12,7 @@ import type {
   ResponseToolInvocation,
   TurnContext,
 } from './types';
+import type { BoardBranch } from '../episodes/types';
 import type { GameEvent } from './events';
 import { gameReducer } from './reducer';
 import { ChessBoard } from '../chess/board';
@@ -55,6 +56,22 @@ export class GameRuntime {
   private replayMoveDelayMs = 800;
   private replayResult: import('./types').GameResult | null = null;
   private replayPaceCheck: (() => Promise<void>) | null = null;
+  /**
+   * Branches indexed by `afterPly`. When a replay move at ply N completes,
+   * we look up boardBranches[N] and execute it before continuing.
+   * Empty when the episode has no branches (default).
+   */
+  private boardBranches: Map<number, BoardBranch> = new Map();
+  /**
+   * Optional hook called when a branch is about to start. The
+   * commentary queue uses this to generate branch-specific narration
+   * BEFORE branch moves play (so the audio leads the visuals).
+   * Returns a promise that the runtime awaits before the first
+   * branch move fires.
+   */
+  private branchNarrationHook:
+    | ((branch: BoardBranch, startingFen: string) => Promise<void>)
+    | null = null;
 
   constructor(
     white: PlayerConfig,
@@ -158,6 +175,135 @@ export class GameRuntime {
    */
   setReplayPaceCheck(fn: (() => Promise<void>) | null): void {
     this.replayPaceCheck = fn;
+  }
+
+  /**
+   * Register board branches for the current replay. Branches fire AFTER
+   * the main-line move at `afterPly` completes — runtime pauses the main
+   * loop, rewinds the board to the branch's startingFen, plays each
+   * branch move, then restores the main-line position before continuing.
+   *
+   * Branches are keyed by `afterPly`; only one branch per ply is supported
+   * (later branches at the same ply overwrite earlier ones). Pass an
+   * empty array to clear.
+   */
+  setBoardBranches(branches: BoardBranch[]): void {
+    this.boardBranches = new Map(branches.map((b) => [b.afterPly, b]));
+  }
+
+  /**
+   * Set the branch-narration hook. The runtime awaits this BEFORE the
+   * first branch move fires, so the commentary queue can generate +
+   * start narrating the branch context while the board sits on the
+   * starting position. Returns a promise the runtime awaits.
+   */
+  setBranchNarrationHook(
+    fn: ((branch: BoardBranch, startingFen: string) => Promise<void>) | null,
+  ): void {
+    this.branchNarrationHook = fn;
+  }
+
+  /**
+   * Execute a branch: emit BranchStarted, rewind board to startingFen,
+   * play each branch move (validating via chess.js, awaiting the move
+   * delay between each), then emit BranchEnded and restore the main
+   * line's FEN.
+   *
+   * The chess.js board state IS mutated during the branch (loaded to
+   * startingFen, then moves applied). We save the main FEN BEFORE the
+   * branch and reload AFTER, so subsequent main-line moves continue
+   * from the right position.
+   */
+  private async executeBranch(branch: BoardBranch, mainPly: number): Promise<void> {
+    if (this.aborted) return;
+    const mainFenBeforeBranch = this.chess.fen();
+    // Resolve startingFen: rewind to fromPly (if specified < afterPly).
+    // Otherwise use the current position. fromPly is 1-indexed; index
+    // into fenHistory[N] = FEN AFTER ply N (fenHistory[0] = starting).
+    const fromPly = branch.fromPly ?? branch.afterPly;
+    const rewindIndex = Math.max(0, Math.min(this.fenHistory.length - 1, fromPly));
+    const startingFen = this.fenHistory[rewindIndex] ?? mainFenBeforeBranch;
+
+    this.emit({
+      type: 'BranchStarted',
+      payload: {
+        branchId: branch.id,
+        fromMainPly: mainPly,
+        startingFen,
+        title: branch.title ?? '',
+      },
+    });
+
+    // Let the commentary queue lead with branch narration.
+    if (this.branchNarrationHook) {
+      try {
+        await this.branchNarrationHook(branch, startingFen);
+      } catch (err) {
+        console.warn('[Branch] narration hook threw — continuing:', err);
+      }
+    }
+    if (this.aborted) return;
+
+    // Rewind the chess.js board.
+    this.chess.load(startingFen);
+
+    const delay = branch.branchMoveDelayMs ?? 1800;
+    for (let i = 0; i < branch.branchMoves.length; i++) {
+      if (this.aborted) break;
+      const san = branch.branchMoves[i];
+      const validation = this.chess.validateMove(san);
+      if (!validation.legal) {
+        console.warn(
+          `[Branch ${branch.id}] illegal move ${san} at branch ply ${i + 1} — skipping rest of branch`,
+        );
+        break;
+      }
+      const moveResult = this.chess.applyMove(validation.san!);
+      const isCheckmate = this.chess.isGameOver() && this.chess.fen().includes('#'); // best-effort
+      this.emit({
+        type: 'BranchMoveApplied',
+        payload: {
+          branchId: branch.id,
+          branchPly: i + 1,
+          color: i % 2 === 0 ? (this.fenColorAt(startingFen) === 'w' ? 'w' : 'b') : this.fenColorAt(startingFen) === 'w' ? 'b' : 'w',
+          san: validation.san!,
+          from: moveResult.from,
+          to: moveResult.to,
+          fen: this.chess.fen(),
+          isCheck: this.chess.isCheck(),
+          isCheckmate,
+          isCapture: moveResult.captured !== undefined,
+        },
+      });
+      if (i < branch.branchMoves.length - 1 && !this.aborted) {
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+
+    // Hold the final branch position briefly so the viewer can absorb
+    // the result before the snap-back. One extra delay tick.
+    if (!this.aborted) await new Promise((r) => setTimeout(r, delay));
+
+    // Restore main line.
+    const resumeMainPly = branch.returnToPly ?? mainPly;
+    const resumeFenIndex = Math.max(0, Math.min(this.fenHistory.length - 1, resumeMainPly));
+    const resumeFen = this.fenHistory[resumeMainPly === mainPly ? this.fenHistory.length - 1 : resumeFenIndex] ?? mainFenBeforeBranch;
+    this.chess.load(resumeFen);
+
+    this.emit({
+      type: 'BranchEnded',
+      payload: {
+        branchId: branch.id,
+        resumeFen,
+        resumeMainPly,
+      },
+    });
+  }
+
+  /** Return whose turn it is at `fen` (w or b). */
+  private fenColorAt(fen: string): PieceColor {
+    const parts = fen.split(' ');
+    return (parts[1] as PieceColor) || 'w';
   }
 
   async start(): Promise<GameState> {
@@ -392,6 +538,16 @@ export class GameRuntime {
             });
             moveApplied = true;
             this.replayMoveIndex++;
+
+            // Branch director: check whether a board branch is
+            // scheduled to fire AFTER this just-played main-line ply.
+            // The ply count includes priorMoveHistory + replayMoveIndex
+            // because both contribute to the canonical episode ply.
+            const mainPly = this.priorSanMoves.length + this.replayMoveIndex;
+            const branch = this.boardBranches.get(mainPly);
+            if (branch && !this.aborted) {
+              await this.executeBranch(branch, mainPly);
+            }
           } else {
             console.error(`[Replay] PGN move illegal: ${replaySan} at index ${this.replayMoveIndex}`);
             this.replayMoveIndex++;

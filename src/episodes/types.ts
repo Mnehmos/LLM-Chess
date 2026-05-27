@@ -88,6 +88,18 @@ export interface Episode {
    */
   moveTangents?: MoveTangent[];
   /**
+   * Branch playback — alternative move sequences the lesson PLAYS on
+   * the actual board (not just shows as a ghost arrow). Each branch
+   * fires after a chosen main-line ply, rewinds to a starting FEN,
+   * plays N branch moves with their own narration, then restores the
+   * main-line position. Used for "what if X here?" interludes,
+   * blunder demonstrations, and explaining trap lines that need to
+   * be SEEN rather than described.
+   *
+   * See docs/design-branch-playback.md for the full design spec.
+   */
+  boardBranches?: BoardBranch[];
+  /**
    * Whiteboard scenes — full-frame educational slates that replace the
    * board view at authored plies. Used for content that doesn't read
    * well on a chess board: strategic principles, decision trees,
@@ -171,6 +183,71 @@ export interface MoveTangent {
    * here, that's because <note>").
    */
   note: string;
+}
+
+/**
+ * A board branch — an alternative line PLAYED on the actual board
+ * for instructional purposes. After the main line reaches `afterPly`,
+ * the lesson pauses, the board snaps to `startingFen` (often the same
+ * position the main line just reached, or a few plies earlier), the
+ * `branchMoves` play with their own narration, then the board
+ * restores to the main-line position and the lesson resumes.
+ *
+ * Branches are NOT recorded in the main move history — they live in
+ * a parallel `currentBranchMoves` array in GameState. Consumers
+ * (BroadcastLayout, recent moves panel) ignore branch moves for
+ * canonical-history rendering but use them to drive the branch
+ * overlay UI.
+ *
+ * See docs/design-branch-playback.md for design rationale.
+ */
+export interface BoardBranch {
+  /** Stable id, e.g. 'italian_fried_liver'. Used to scope events. */
+  id: string;
+  /**
+   * 1-indexed ply AFTER which this branch plays. Lesson finishes
+   * narrating move `afterPly`, then the branch fires.
+   */
+  afterPly: number;
+  /**
+   * 1-indexed main-line ply that defines the position to rewind to
+   * before playing branchMoves. Default = afterPly (no rewind — branch
+   * starts from the current position). Set lower to rewind, e.g.
+   * "what if Black had played X 2 moves ago?" → fromPly = afterPly - 2.
+   */
+  fromPly?: number;
+  /**
+   * SAN move sequence to play from the startingFen. 3-8 moves is the
+   * sweet spot; longer branches lose viewer attention. Validated at
+   * mount against the main PGN's position before fromPly.
+   */
+  branchMoves: string[];
+  /**
+   * One-paragraph narration cue spliced into the commentator prompt
+   * during the branch. Tells the LLM the educational point of THIS
+   * branch ("show what happens after Bxf7+: Black walks the king
+   * but White has no follow-up — Black is up a piece").
+   */
+  narrationCue: string;
+  /**
+   * 1-indexed main-line ply to resume at after the branch ends.
+   * Default = afterPly (no skip — main line resumes from where it
+   * paused). Set higher to skip ahead, e.g. branch covers moves
+   * 8-12 hypothetically and main line resumes at 12.
+   */
+  returnToPly?: number;
+  /**
+   * Wall-clock delay between each branch move (ms). Default 1800 —
+   * a touch faster than the main line's narration-gated pace so the
+   * branch reads as a tight hypothetical interlude, not a parallel
+   * lesson.
+   */
+  branchMoveDelayMs?: number;
+  /**
+   * Banner title shown during the branch (e.g. "Blunder Line: 7.Bxf7+
+   * loses the bishop"). Empty string = no banner.
+   */
+  title?: string;
 }
 
 /**

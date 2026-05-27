@@ -157,9 +157,31 @@ export function BroadcastLayout({
   // displayed FEN and for the recent-moves panel (empty during intro).
   const narratedInfo = narratedMoveInfo(gameState, narrationMoveIndex, pgnMoves);
   const startingFen = startingFenFor(gameState);
-  const displayedFen = narratedInfo?.fen ?? startingFen ?? gameState.fen;
-  const displayedLastMove =
-    narratedInfo && narratedInfo.from && narratedInfo.to
+
+  // Branch playback override. When the runtime is mid-branch, the
+  // displayed board switches to the branch's current FEN. The last
+  // move highlight follows the most recent BranchMoveApplied event
+  // (parsed from the eventLog tail). The banner is shown by the
+  // multi-modal layout when activeBranch is truthy.
+  const activeBranch = gameState.activeBranch ?? null;
+  const lastBranchMove = useMemo<{ from: string; to: string } | null>(() => {
+    if (!activeBranch) return null;
+    for (let i = gameState.eventLog.length - 1; i >= 0; i--) {
+      const evt = gameState.eventLog[i];
+      if (evt.type === 'BranchMoveApplied' && evt.payload.branchId === activeBranch.branchId) {
+        return { from: evt.payload.from, to: evt.payload.to };
+      }
+      if (evt.type === 'BranchStarted' && evt.payload.branchId === activeBranch.branchId) break;
+    }
+    return null;
+  }, [activeBranch, gameState.eventLog]);
+
+  const displayedFen = activeBranch
+    ? activeBranch.currentFen
+    : narratedInfo?.fen ?? startingFen ?? gameState.fen;
+  const displayedLastMove = activeBranch
+    ? lastBranchMove ?? undefined
+    : narratedInfo && narratedInfo.from && narratedInfo.to
       ? { from: narratedInfo.from, to: narratedInfo.to }
       : narratedInfo
         ? lastMove
@@ -307,6 +329,7 @@ export function BroadcastLayout({
       fullMoveList={fullMoveList}
       activePly={currentPly}
       activeFunFact={activeFunFact}
+      activeBranch={activeBranch}
     />;
   }
   return <FullLayout
@@ -322,8 +345,11 @@ export function BroadcastLayout({
     recentMoves={recentMoves}
     evalPct={evalPct}
     evalLabel={evalLabel}
+    activeBranch={activeBranch}
   />;
 }
+
+type ActiveBranchInfo = NonNullable<GameState['activeBranch']>;
 
 interface LayoutSlotProps {
   displayedFen: string;
@@ -338,6 +364,8 @@ interface LayoutSlotProps {
   recentMoves: { turn: number; white?: string; black?: string }[];
   evalPct: number;
   evalLabel: string;
+  /** Non-null when a branch is mid-playback. Drives the branch banner overlay. */
+  activeBranch?: ActiveBranchInfo | null;
 }
 
 interface MultiModalSlotProps {
@@ -358,6 +386,7 @@ interface MultiModalSlotProps {
   fullMoveList: { num: number; white?: string; black?: string; whitePly?: number; blackPly?: number }[];
   activePly: number;
   activeFunFact: FunFact | null;
+  activeBranch?: ActiveBranchInfo | null;
 }
 
 /**
@@ -392,30 +421,57 @@ function MultiModalLayout({
   fullMoveList,
   activePly,
   activeFunFact,
+  activeBranch,
 }: MultiModalSlotProps) {
   return (
     <div className="w-screen h-screen bg-surface-0 text-text-primary flex flex-col overflow-hidden">
       {/* Chapter header bar — full width. Shows chapter number badge,
-          title, and subtitle. Right side: move counter. */}
-      <header className="h-24 px-10 flex items-center justify-between border-b border-surface-2 shrink-0">
-        <div className="flex items-baseline gap-6">
-          <div className="text-cyan-400 text-sm font-semibold uppercase tracking-widest">
-            Chapter {activeChapterIndex + 1} / {totalChapters}
+          title, and subtitle. Right side: move counter. While a branch
+          is mid-playback, the chapter row is overlaid with a BRANCH
+          banner so the viewer instantly knows the board is showing a
+          hypothetical line, not the main lesson. */}
+      {activeBranch ? (
+        <header className="h-24 px-10 flex items-center justify-between border-b-2 border-amber-500/70 bg-amber-900/20 shrink-0">
+          <div className="flex items-baseline gap-6">
+            <div className="text-amber-400 text-sm font-bold uppercase tracking-widest">
+              Branch · Hypothetical Line
+            </div>
+            <div>
+              <div className="text-3xl font-bold leading-tight text-amber-100">
+                {activeBranch.title || 'Alternative line'}
+              </div>
+              <div className="text-base text-amber-300/80 mt-0.5">
+                What if we tried this instead? Board returns to the main line after.
+              </div>
+            </div>
           </div>
-          <div>
-            <div className="text-3xl font-bold leading-tight">{activeChapter.title}</div>
-            {activeChapter.subtitle && (
-              <div className="text-base text-text-muted mt-0.5">{activeChapter.subtitle}</div>
-            )}
+          <div className="text-xl text-amber-200 font-mono">{moveCounterText}</div>
+        </header>
+      ) : (
+        <header className="h-24 px-10 flex items-center justify-between border-b border-surface-2 shrink-0">
+          <div className="flex items-baseline gap-6">
+            <div className="text-cyan-400 text-sm font-semibold uppercase tracking-widest">
+              Chapter {activeChapterIndex + 1} / {totalChapters}
+            </div>
+            <div>
+              <div className="text-3xl font-bold leading-tight">{activeChapter.title}</div>
+              {activeChapter.subtitle && (
+                <div className="text-base text-text-muted mt-0.5">{activeChapter.subtitle}</div>
+              )}
+            </div>
           </div>
-        </div>
-        <div className="text-xl text-text-secondary font-mono">{moveCounterText}</div>
-      </header>
+          <div className="text-xl text-text-secondary font-mono">{moveCounterText}</div>
+        </header>
+      )}
 
       <main className="flex-1 flex min-h-0">
-        {/* Column 1: Board (~900px) */}
+        {/* Column 1: Board (~900px). Branch-mode adds an amber ring +
+            slight inset to distinguish the hypothetical playback. */}
         <section className="flex-1 flex flex-col items-center justify-center px-6 min-w-0">
-          <div style={{ zoom: 2.35 }}>
+          <div
+            style={{ zoom: 2.35 }}
+            className={activeBranch ? 'ring-4 ring-amber-500/60 rounded-lg' : ''}
+          >
             <Board
               fen={displayedFen}
               lastMove={lastMove}
@@ -466,25 +522,43 @@ function FullLayout({
   recentMoves,
   evalPct,
   evalLabel,
+  activeBranch,
 }: LayoutSlotProps) {
   return (
     <div className="w-screen h-screen bg-surface-0 text-text-primary flex flex-col overflow-hidden">
-      {/* Title bar */}
-      <header className="h-20 px-10 flex items-center justify-between border-b border-surface-2 shrink-0">
-        <div>
-          <div className="text-3xl font-bold leading-tight">{title}</div>
-          {subtitle && <div className="text-sm text-text-muted mt-0.5">{subtitle}</div>}
-        </div>
-        <div className="text-xl text-text-secondary font-mono">{moveCounterText}</div>
-      </header>
+      {/* Title bar (or branch banner when mid-branch). */}
+      {activeBranch ? (
+        <header className="h-20 px-10 flex items-center justify-between border-b-2 border-amber-500/70 bg-amber-900/20 shrink-0">
+          <div>
+            <div className="text-amber-400 text-xs font-bold uppercase tracking-widest">
+              Branch · Hypothetical Line
+            </div>
+            <div className="text-2xl font-bold leading-tight text-amber-100">
+              {activeBranch.title || 'Alternative line'}
+            </div>
+          </div>
+          <div className="text-xl text-amber-200 font-mono">{moveCounterText}</div>
+        </header>
+      ) : (
+        <header className="h-20 px-10 flex items-center justify-between border-b border-surface-2 shrink-0">
+          <div>
+            <div className="text-3xl font-bold leading-tight">{title}</div>
+            {subtitle && <div className="text-sm text-text-muted mt-0.5">{subtitle}</div>}
+          </div>
+          <div className="text-xl text-text-secondary font-mono">{moveCounterText}</div>
+        </header>
+      )}
 
       {/* Main split: board left, commentary + moves right */}
       <main className="flex-1 flex min-h-0">
         {/* Board column - fills available height. CSS zoom scales the
             384 px board up to ~922 px while keeping pixel-perfect
-            chess geometry. */}
+            chess geometry. Branch-mode adds an amber ring. */}
         <section className="flex-1 flex flex-col items-center justify-center px-10 min-w-0">
-          <div style={{ zoom: 2.4 }}>
+          <div
+            style={{ zoom: 2.4 }}
+            className={activeBranch ? 'ring-4 ring-amber-500/60 rounded-lg' : ''}
+          >
             <Board
               fen={displayedFen}
               lastMove={lastMove}

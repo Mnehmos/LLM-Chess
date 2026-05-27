@@ -589,6 +589,25 @@ export interface GameState {
   eventLog: import('./events').GameEvent[];
   // --- Taxonomy extensions ---
   gameClock?: { whiteRemainingMs: number; blackRemainingMs: number };
+  /**
+   * Active branch playback state. Non-null only while a board branch
+   * is executing (see docs/design-branch-playback.md). The displayed
+   * board switches to `currentBranchFen` and accumulates the branch
+   * moves in `moves` — independent of moveHistory, which stays on
+   * the main line.
+   */
+  activeBranch?: {
+    branchId: string;
+    title: string;
+    /** FEN BEFORE the first branch move (= where we rewound to). */
+    startingFen: string;
+    /** Current FEN within the branch (advances with each branch move). */
+    currentFen: string;
+    /** Branch moves played so far. */
+    moves: MoveRecord[];
+    /** Main-line ply we'll restore to when the branch ends. */
+    resumeMainPly: number;
+  } | null;
 }
 
 // --- UHO Opening Book ---

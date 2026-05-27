@@ -134,6 +134,58 @@ export function gameReducer(state: GameState, event: GameEvent): GameState {
       }
       return withEvent;
 
+    // ───────────────────────────────────────────────────────
+    // Branch playback events. Branch state lives in
+    // state.activeBranch — NOT in moveHistory. Consumers
+    // (BroadcastLayout) render the branch position when
+    // activeBranch is non-null; otherwise they show the main
+    // line's `fen` field as usual.
+    // ───────────────────────────────────────────────────────
+
+    case 'BranchStarted':
+      return {
+        ...withEvent,
+        activeBranch: {
+          branchId: event.payload.branchId,
+          title: event.payload.title,
+          startingFen: event.payload.startingFen,
+          currentFen: event.payload.startingFen,
+          moves: [],
+          resumeMainPly: event.payload.fromMainPly,
+        },
+      };
+
+    case 'BranchMoveApplied': {
+      if (!state.activeBranch) return withEvent;
+      return {
+        ...withEvent,
+        activeBranch: {
+          ...state.activeBranch,
+          currentFen: event.payload.fen,
+          moves: [
+            ...state.activeBranch.moves,
+            {
+              turnNumber: Math.ceil(event.payload.branchPly / 2),
+              color: event.payload.color,
+              move: event.payload.san,
+              thinkingTimeMs: 0,
+              attempts: 1,
+            },
+          ],
+        },
+      };
+    }
+
+    case 'BranchEnded':
+      // Restoring fen on the main state. moveHistory is unchanged
+      // (the branch was never part of the main line). The next
+      // MoveApplied for the main line continues from here.
+      return {
+        ...withEvent,
+        fen: event.payload.resumeFen,
+        activeBranch: null,
+      };
+
     default:
       return withEvent;
   }

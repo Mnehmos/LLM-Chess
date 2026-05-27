@@ -155,7 +155,7 @@ interface TournamentStore {
   resumeGame: (matchIndex: number, pairIndex: number, slotIndex: 0 | 1) => void;
 
   // Replay actions
-  startReplay: (pgn: string, config: { historicalContext?: string; lessonContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean }) => void;
+  startReplay: (pgn: string, config: { historicalContext?: string; lessonContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean; boardBranches?: import('../episodes/types').BoardBranch[] }) =>void;
   stopReplay: () => void;
 
   // Multi-tournament actions
@@ -641,7 +641,7 @@ export const useTournamentStore = create<TournamentStore>()(
 
       // --- Replay actions ---
 
-      startReplay: (pgn: string, config: { historicalContext?: string; lessonContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean }) => {
+      startReplay: (pgn: string, config: { historicalContext?: string; lessonContext?: string; moveDelayMs?: number; startFromPly?: number; paceWithNarration?: boolean; boardBranches?: import('../episodes/types').BoardBranch[] }) =>{
         const { activeRuntime } = get();
         if (activeRuntime) {
           activeRuntime.abort('Starting replay');
@@ -739,6 +739,25 @@ export const useTournamentStore = create<TournamentStore>()(
             }
             if (_waitForNarration) {
               try { await _waitForNarration(); } catch { /* same */ }
+            }
+          });
+        }
+
+        // Wire board branches: when the main line hits an authored
+        // ply, the runtime pauses and plays the branch on the board.
+        // The narration hook lets the commentator generate the
+        // branch's spoken context BEFORE branch moves fire, so the
+        // audio leads the visuals — same pattern as the futures/outro
+        // sequence in the post-game .then() block.
+        if (config.boardBranches && config.boardBranches.length > 0) {
+          runtime.setBoardBranches(config.boardBranches);
+          runtime.setBranchNarrationHook(async (branch, startingFen) => {
+            if (!_commentaryQueue) return;
+            try {
+              await _commentaryQueue.generateBranch(branch, startingFen);
+              if (_waitForNarration) await _waitForNarration();
+            } catch (err) {
+              console.warn('[Replay] branch narration failed — branch will play silently:', err);
             }
           });
         }
