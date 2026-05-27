@@ -1,4 +1,4 @@
-import type { Episode, MoveTangent } from '../types';
+import type { Episode, MoveTangent, WhiteboardScene } from '../types';
 import { ITALIAN_GAME_LESSON_PGN } from './pgn';
 import { ITALIAN_GAME_LESSON_COMMENTATOR } from './commentator';
 import { ITALIAN_GAME_VARIATIONS } from './variations';
@@ -38,6 +38,62 @@ const ITALIAN_GAME_TANGENTS: MoveTangent[] = [
   },
 ];
 
+// POC whiteboard scenes — three illustrative slates along the Italian
+// Game teaching line. Each plays AFTER the matching ply's move
+// commentary, gated by the ?whiteboard=1 URL flag. Default captures
+// skip these entirely, so the standard MP4 output is unchanged.
+const ITALIAN_GAME_WHITEBOARD: WhiteboardScene[] = [
+  {
+    kind: 'bullets',
+    ply: 3, // After 2.Nf3 (White's 2nd move, before Black's reply)
+    heading: 'What is the Italian Game?',
+    narrationCue:
+      'Pause to set up the lesson: what the Italian Game is, who plays it, what win conditions each side targets.',
+    durationMs: 14000,
+    bullets: [
+      "1.e4 e5 2.Nf3 Nc6 3.Bc4 — White's bishop aims at f7, Black's weakest square.",
+      'The oldest opening still played at the top level; Greco published analysis in 1620.',
+      "Two modern flavors: quiet d3 system (positional grind) or c3-d4 break (classical attack).",
+      "Black's main reply: 3...Bc5 mirroring development; or 3...Nf6 (Two Knights, sharper).",
+    ],
+  },
+  {
+    kind: 'pawn_structure',
+    ply: 10, // After 5.d3 d6 (both sides locked the pawn structure)
+    heading: "The Italian Pawn Structure",
+    narrationCue:
+      "Pause to explain the locked pawn skeleton — what it tells you about both sides' middlegame plans.",
+    durationMs: 13000,
+    whitePawns: ['a2', 'b2', 'c3', 'd3', 'e4', 'f2', 'g2', 'h2'],
+    blackPawns: ['a7', 'b7', 'c7', 'd6', 'e5', 'f7', 'g7', 'h7'],
+    caption:
+      "Symmetric except for c3 vs c7. White's c3 prepares d4; Black's d6 supports e5 and stops Bxf7+.",
+  },
+  {
+    kind: 'move_tree',
+    ply: 13, // After 6.O-O O-O (both castled)
+    heading: 'Three Plans from this Position',
+    narrationCue:
+      'Pause to outline the strategic fork after castling: which plan is White picking, and why.',
+    durationMs: 15000,
+    root: 'After 6.O-O O-O, White chooses one of three plans:',
+    branches: [
+      {
+        label: 'Quiet Italian — Nbd2/Nf1/Ng3 knight tour',
+        moves: ['Nbd2', 'a6', 'Bb3', 'Ba7', 'Re1', 'h6', 'Nf1'],
+      },
+      {
+        label: 'Classical — c3 + d4 central break',
+        moves: ['c3', 'a6', 'd4', 'exd4', 'cxd4', 'Bb6'],
+      },
+      {
+        label: 'Aggressive — h3 prep + Bg5 pin',
+        moves: ['h3', 'h6', 'Bg5', 'Be6', 'Bxe6', 'fxe6'],
+      },
+    ],
+  },
+];
+
 /**
  * The Italian Game — opening lesson.
  *
@@ -60,6 +116,7 @@ export const ITALIAN_GAME_LESSON_EPISODE: Episode = {
   commentator: ITALIAN_GAME_LESSON_COMMENTATOR,
   bookStandard: ITALIAN_GAME_BOOK_STANDARD,
   moveTangents: ITALIAN_GAME_TANGENTS,
+  whiteboardScenes: ITALIAN_GAME_WHITEBOARD,
   exports: ITALIAN_GAME_EXPORT,
 };
 

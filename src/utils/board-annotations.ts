@@ -191,7 +191,9 @@ function cleanAfterStrip(text: string): string {
   return text
     .replace(/\s{2,}/g, ' ')
     .replace(/\s+([.,;:!?])/g, '$1')
-    .replace(/([.,;:!?])\1+/g, '$1')
+    .replace(/([,;:!?])\1+/g, '$1')
+    .replace(/\.{4,}/g, '...')
+    .replace(/([^\s.])\.{3}(?=\s*(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8]|O-O))/g, '$1 ...')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }

@@ -87,6 +87,18 @@ export interface Episode {
    * here, that's a typical student mistake because…").
    */
   moveTangents?: MoveTangent[];
+  /**
+   * Whiteboard scenes — full-frame educational slates that replace the
+   * board view at authored plies. Used for content that doesn't read
+   * well on a chess board: strategic principles, decision trees,
+   * pawn-structure-only diagrams, abstract attack patterns.
+   *
+   * Gated by the `?whiteboard=1` URL flag on the capture — default
+   * captures skip them, so the same Episode renders cleanly with or
+   * without whiteboard. Adding scenes to an Episode does NOT change
+   * what the standard capture produces.
+   */
+  whiteboardScenes?: WhiteboardScene[];
   /** Export configuration. Present once the episode is planned for export. */
   exports?: EpisodeExportConfig;
   /** Published references (e.g. YouTube URLs). Workspace-tracked. */
@@ -130,6 +142,100 @@ export interface MoveTangent {
    * here, that's because <note>").
    */
   note: string;
+}
+
+/**
+ * A whiteboard scene — a full-frame educational slate that replaces
+ * the board view at a specific ply for a fixed duration.
+ *
+ * Discriminated by `kind`:
+ *   - 'bullets':      heading + 3-5 bullet points
+ *   - 'pawn_structure': 8x8 grid with JUST pawns (no pieces)
+ *   - 'move_tree':    branching tree of "if X then Y" continuations
+ *   - 'arrow_diagram': empty/sparse board with annotated arrows
+ *
+ * All scenes share:
+ *   - ply:          the 1-indexed move number after which the scene
+ *                   plays. Scene fades in BEFORE the next move's
+ *                   commentary; fades out before play resumes.
+ *   - durationMs:   how long the scene stays on-screen
+ *   - narrationCue: one-line context for the commentator's LLM prompt
+ *                   so the AI knows what to talk about during the
+ *                   scene ("explain the pawn structure", "narrate the
+ *                   decision tree branches", etc.)
+ */
+export type WhiteboardScene =
+  | WhiteboardBulletsScene
+  | WhiteboardPawnStructureScene
+  | WhiteboardMoveTreeScene
+  | WhiteboardArrowDiagramScene;
+
+interface WhiteboardSceneBase {
+  /** 1-indexed ply AFTER which the scene plays (0 = before the first move). */
+  ply: number;
+  /** Wall-clock duration of the scene in milliseconds. Default 12000 (12s). */
+  durationMs?: number;
+  /**
+   * One-line educational topic the commentator should narrate over
+   * the scene. Injected into the commentator's prompt so the audio
+   * matches what the viewer sees.
+   */
+  narrationCue: string;
+  /** Scene heading shown at the top of the slate. */
+  heading: string;
+}
+
+/** Heading + 3-5 bullet points. */
+export interface WhiteboardBulletsScene extends WhiteboardSceneBase {
+  kind: 'bullets';
+  bullets: string[];
+}
+
+/**
+ * 8x8 pawn-only diagram. `whitePawns` and `blackPawns` are square
+ * names (e.g. "e4", "d5"). Empty arrays render a blank pawn skeleton.
+ */
+export interface WhiteboardPawnStructureScene extends WhiteboardSceneBase {
+  kind: 'pawn_structure';
+  whitePawns: string[];
+  blackPawns: string[];
+  /** Optional 1-line caption under the diagram. */
+  caption?: string;
+}
+
+/**
+ * Branching move tree. The `root` is the position to start from
+ * (e.g. "after 7.O-O"), each `branch` is a label + sequence of moves.
+ */
+export interface WhiteboardMoveTreeScene extends WhiteboardSceneBase {
+  kind: 'move_tree';
+  /** Caption above the tree, e.g. "From this position, three plans:". */
+  root: string;
+  branches: Array<{
+    /** Branch label, e.g. "Aggressive: c3-d4 break". */
+    label: string;
+    /** Move sequence as SAN strings, e.g. ["c3", "Nf6", "d4"]. */
+    moves: string[];
+  }>;
+}
+
+/**
+ * Empty or sparse board with free-form annotated arrows. `pieces` is
+ * an optional sparse set of `{ square, piece }` entries (one or two
+ * key pieces) — used to show attack patterns / piece-flow ideas
+ * abstractly without committing the actual position.
+ *
+ * `arrows` follows the same shape as BoardAnnotations.AnnotationArrow
+ * but is authored directly here.
+ */
+export interface WhiteboardArrowDiagramScene extends WhiteboardSceneBase {
+  kind: 'arrow_diagram';
+  /** Optional sparse piece placement (e.g. one or two key pieces). */
+  pieces?: Array<{ square: string; piece: 'wK' | 'wQ' | 'wR' | 'wB' | 'wN' | 'wP' | 'bK' | 'bQ' | 'bR' | 'bB' | 'bN' | 'bP' }>;
+  /** Annotated arrows with labels (label appears next to the arrow). */
+  arrows: Array<{ from: string; to: string; label?: string; color?: string }>;
+  /** Optional caption below the diagram. */
+  caption?: string;
 }
 
 /** Provenance of the PGN that backs the Episode. */

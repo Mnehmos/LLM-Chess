@@ -8,6 +8,7 @@ import { getEpisode, DEFAULT_EPISODE_ID } from '../episodes';
 import type { MoveTangent } from '../episodes/types';
 import { TournamentProgress } from './TournamentProgress';
 import { BroadcastLayout } from './BroadcastLayout';
+import { WhiteboardOverlay } from './WhiteboardOverlay';
 import { getActiveAudioNarrationQueue, runWhenAudioNarrationQueueAvailable, type NarrationMove } from '../tts/audio-queue';
 import { createRenderPlanFromPgn, type RenderPlan } from '../production/renderPlan';
 import { parseSinglePgn, type PgnMove } from '../pgn/parser';
@@ -292,6 +293,53 @@ export function BroadcastView() {
     });
   }, [activeGameState, shortRange, stopReplay, isRunning]);
 
+  const lastMove = computeLastMove(activeGameState);
+  const commentaryEntries = computeCommentaryEntries(activeGameState, commentaryLog);
+  const episode = config.episodeId ? getEpisode(config.episodeId) : undefined;
+
+  // Resolve per-ply ghost arrows from the episode's moveTangents.
+  // Pure function of (pgnMoves, moveTangents) so useMemo is enough —
+  // no effect, no re-resolution mid-capture.
+  const tangentsByPly = useMemo(
+    () => resolveTangentGhostArrows(pgnMoves, episode?.moveTangents ?? []),
+    [pgnMoves, episode?.moveTangents],
+  );
+
+  // Merge ghost arrows for the currently-narrated ply into the
+  // BoardAnnotations flowing to the layout. narrationMoveIndex is
+  // 0-indexed; ply is 1-indexed (ply = narrationMoveIndex + 1).
+  // Outside narration (intro / outro) narrationMoveIndex < 0 and no
+  // ghost arrows are shown.
+  const effectiveAnnotations = useMemo<BoardAnnotations | undefined>(() => {
+    const currentGhosts = narrationMoveIndex >= 0 ? tangentsByPly.get(narrationMoveIndex + 1) : undefined;
+    if (!currentGhosts || currentGhosts.length === 0) return narrationAnnotations;
+    const base: BoardAnnotations = narrationAnnotations ?? { arrows: [], highlights: [], circles: [] };
+    return { ...base, ghostArrows: currentGhosts };
+  }, [narrationAnnotations, narrationMoveIndex, tangentsByPly]);
+
+  // Whiteboard scene resolution. Gated by ?whiteboard=1 URL flag —
+  // when off, no scenes render regardless of episode authoring. When
+  // on, the scene whose `ply` matches the current narration ply is
+  // active and renders as a full-frame overlay.
+  //
+  // Scene timing: ply N's scene plays AFTER move N's commentary but
+  // BEFORE move N+1's commentary. For v1 the trigger is simply
+  // "narrationMoveIndex equals scene.ply - 1" — i.e. while the
+  // narration is on move N, scene at ply N is overlaid. Refinement
+  // for future PRs: dedicated narration cues so the scene only shows
+  // for its authored duration mid-move, not for the whole ply.
+  const whiteboardSceneByPly = useMemo(() => {
+    if (!config.whiteboard) return new Map<number, import('../episodes/types').WhiteboardScene>();
+    const scenes = episode?.whiteboardScenes ?? [];
+    const map = new Map<number, import('../episodes/types').WhiteboardScene>();
+    for (const scene of scenes) map.set(scene.ply, scene);
+    return map;
+  }, [config.whiteboard, episode?.whiteboardScenes]);
+  const activeWhiteboardScene = useMemo(() => {
+    if (narrationMoveIndex < 0) return undefined;
+    return whiteboardSceneByPly.get(narrationMoveIndex + 1);
+  }, [whiteboardSceneByPly, narrationMoveIndex]);
+
   if (loadError) {
     return (
       <div className="min-h-screen bg-surface-0 flex items-center justify-center">
@@ -340,30 +388,6 @@ export function BroadcastView() {
   //
   // The off-screen TournamentProgress is moved to fixed `top: -10000px`
   // so it does not intercept paint nor inflate the captured viewport.
-  const lastMove = computeLastMove(activeGameState);
-  const commentaryEntries = computeCommentaryEntries(activeGameState, commentaryLog);
-  const episode = config.episodeId ? getEpisode(config.episodeId) : undefined;
-
-  // Resolve per-ply ghost arrows from the episode's moveTangents.
-  // Pure function of (pgnMoves, moveTangents) so useMemo is enough —
-  // no effect, no re-resolution mid-capture.
-  const tangentsByPly = useMemo(
-    () => resolveTangentGhostArrows(pgnMoves, episode?.moveTangents ?? []),
-    [pgnMoves, episode?.moveTangents],
-  );
-
-  // Merge ghost arrows for the currently-narrated ply into the
-  // BoardAnnotations flowing to the layout. narrationMoveIndex is
-  // 0-indexed; ply is 1-indexed (ply = narrationMoveIndex + 1).
-  // Outside narration (intro / outro) narrationMoveIndex < 0 and no
-  // ghost arrows are shown.
-  const effectiveAnnotations = useMemo<BoardAnnotations | undefined>(() => {
-    const currentGhosts = narrationMoveIndex >= 0 ? tangentsByPly.get(narrationMoveIndex + 1) : undefined;
-    if (!currentGhosts || currentGhosts.length === 0) return narrationAnnotations;
-    const base: BoardAnnotations = narrationAnnotations ?? { arrows: [], highlights: [], circles: [] };
-    return { ...base, ghostArrows: currentGhosts };
-  }, [narrationAnnotations, narrationMoveIndex, tangentsByPly]);
-
   return (
     <>
       <div style={{ position: 'fixed', top: -10000, left: 0, width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' }} aria-hidden>
@@ -390,6 +414,11 @@ export function BroadcastView() {
         narrationArrows={narrationArrows}
         pgnMoves={pgnMoves}
       />
+      {/* Whiteboard overlay — full-frame scene that takes over the
+          board area when an authored scene matches the current
+          narration ply. Above BroadcastLayout in z-order. Gated by
+          ?whiteboard=1 (already applied in whiteboardSceneByPly). */}
+      {activeWhiteboardScene && <WhiteboardOverlay scene={activeWhiteboardScene} />}
     </>
   );
 }
