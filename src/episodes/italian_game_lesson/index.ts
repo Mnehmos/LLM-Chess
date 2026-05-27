@@ -1,4 +1,4 @@
-import type { Episode, MoveTangent, WhiteboardScene } from '../types';
+import type { Episode, MoveTangent, WhiteboardScene, BoardBranch } from '../types';
 import { ITALIAN_GAME_LESSON_PGN } from './pgn';
 import { ITALIAN_GAME_LESSON_COMMENTATOR } from './commentator';
 import { ITALIAN_GAME_VARIATIONS } from './variations';
@@ -35,6 +35,29 @@ const ITALIAN_GAME_TANGENTS: MoveTangent[] = [
     san: 'Bxf7+',
     category: 'student_mistake',
     note: 'Bxf7+ is the famous Italian sacrifice pattern but here it loses the bishop outright — ...Kxf7 and White has no follow-up. Castle first.',
+  },
+];
+
+// POC board branches — instructor-controlled "what if" interludes.
+// The lesson pauses after the chosen ply, plays the branch moves on
+// the actual board (with amber banner), then restores the main line.
+//
+// Italian Game branch: after Black plays 5...d6 (ply 10), the board
+// switches to "what if White tried Bxf7+ here?" — a famous student
+// blunder. The branch demonstrates that Black's king walks but White
+// has no follow-up, ending in a clearly losing position for White.
+// SANs validated legal against the main PGN's position after ply 10.
+const ITALIAN_GAME_BOARD_BRANCHES: BoardBranch[] = [
+  {
+    id: 'italian_bxf7_blunder',
+    afterPly: 10, // After 5...d6 (Black's 5th move), White to play
+    fromPly: 10, // No rewind — branch starts from the current position
+    title: '6.Bxf7+ — the bishop sacrifice that doesn\'t work',
+    branchMoves: ['Bxf7+', 'Kxf7', 'Ng5+', 'Kg8', 'Qh5+', 'g6'],
+    narrationCue:
+      "Show what happens if White tries the famous Bxf7+ sacrifice here instead of castling. The king walks but White has no follow-up — after Qh5+ g6 White is just down a bishop with no compensation. This is the most common reason club players LOSE games as White in the Italian: confusing the Fried Liver pattern (which needs ...Nxe5) with positions where it just hangs a piece.",
+    returnToPly: 10, // Resume main line at ply 11 (6.O-O)
+    branchMoveDelayMs: 1800,
   },
 ];
 
@@ -116,6 +139,7 @@ export const ITALIAN_GAME_LESSON_EPISODE: Episode = {
   commentator: ITALIAN_GAME_LESSON_COMMENTATOR,
   bookStandard: ITALIAN_GAME_BOOK_STANDARD,
   moveTangents: ITALIAN_GAME_TANGENTS,
+  boardBranches: ITALIAN_GAME_BOARD_BRANCHES,
   whiteboardScenes: ITALIAN_GAME_WHITEBOARD,
   exports: ITALIAN_GAME_EXPORT,
 };

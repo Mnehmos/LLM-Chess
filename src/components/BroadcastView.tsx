@@ -214,6 +214,13 @@ export function BroadcastView() {
           });
         });
 
+        // Resolve board branches from the active episode (or the
+        // variation if we're capturing one).
+        const branchEpisode = config.episodeId ? getEpisode(config.episodeId) : undefined;
+        const boardBranches = config.variationId
+          ? undefined // variations are themselves alternative lines — no nested branches
+          : branchEpisode?.boardBranches;
+
         startReplay(pgnText, {
           historicalContext,
           lessonContext,
@@ -225,6 +232,7 @@ export function BroadcastView() {
           moveDelayMs: 2000,
           paceWithNarration: true,
           startFromPly: shortRange?.startPly ?? 0,
+          boardBranches,
         });
       },
       reset: () => {

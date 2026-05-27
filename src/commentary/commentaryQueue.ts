@@ -1,6 +1,7 @@
 import type { EvalResult } from '../chess/stockfish';
 import type { CommentaryContext } from '../llm/prompts';
 import { buildCommentaryPrompt, VERBOSITY_TOKEN_MAP } from '../llm/prompts';
+import type { BoardBranch } from '../episodes/types';
 import type { LLMClient } from '../llm/client';
 import type { CommentatorConfig } from '../engine/types';
 import { buildBatchCommentaryPrompt } from './batchPrompt';
@@ -516,6 +517,117 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
       const message = err instanceof Error ? err.message : String(err);
       console.warn('[Commentary] Recap failed:', message);
       this.completeEntry(entryIndex, buildRecapFallback(whiteModel, blackModel, result, totalMoves, ttsMode));
+    }
+  }
+
+  /**
+   * Generate a single narration block covering an entire board branch.
+   *
+   * The branch is an "instructor pause" — the lesson rewinds the board,
+   * plays an alternative line, then restores. This call produces ONE
+   * spoken paragraph that opens the branch and previews what the
+   * viewer is about to see, while the board sits on the starting FEN.
+   * Branch moves then fire on the board with delays; we do NOT generate
+   * per-branch-move commentary (that's a v2 enhancement).
+   *
+   * The runtime awaits this call before the first branch move fires.
+   */
+  async generateBranch(branch: BoardBranch, startingFen: string): Promise<void> {
+    if (this.destroyed) return;
+    const model = this.config.getCommentatorModel();
+    if (!model.id) return;
+    console.log('[Commentary] generateBranch %s: starting with model=%s', branch.id, model.id);
+
+    // Block processNext for the duration so the branch entry is the
+    // singular focus, just like generateIntro does.
+    this.active = [];
+
+    const entry: CommentaryEntry = {
+      id: genId(),
+      moves: [],
+      text: '',
+      streaming: true,
+      timestamp: Date.now(),
+      maxMoveIndex: -1,
+      isFiller: true,
+    };
+    this.entries = [...this.entries, entry];
+    const entryIndex = this.entries.length - 1;
+    this.emit();
+    let abortCtrl: AbortController | null = null;
+
+    const ttsMode = this.config.getTtsMode?.() ?? false;
+    const titleLine = branch.title ? `Branch title: ${branch.title}.\n` : '';
+    const branchPrompt = `You are narrating a teaching BRANCH — a hypothetical alternative line the lesson is about to play on the board. The viewer will SEE the next ${branch.branchMoves.length} moves play out, then the board snaps back to the main line.
+
+${titleLine}Branch starting position FEN: ${startingFen}
+Branch moves (will play in this order): ${branch.branchMoves.join(' ')}
+
+Educational point of the branch: ${branch.narrationCue}
+
+Write 2-3 spoken sentences that OPEN the branch — frame what the viewer is about to see, the question this branch answers, and what to watch for. ${ttsMode ? 'Spoken naturally, no markdown.' : 'Use rich markdown.'}
+
+Do NOT walk through every branch move individually — the board does that visually. Stay at the strategic / "why we're showing this" level. Do NOT reference "the video", "the viewer", or "the audience". Do NOT add a closing transition; the runtime will return to the main line on its own.`;
+
+    try {
+      const client = this.config.getClient();
+      abortCtrl = new AbortController();
+      this.activeGenerationAbort = abortCtrl;
+
+      const messages: import('../llm/prompts').ChatMessage[] = [
+        {
+          role: 'system',
+          content:
+            this.config.systemPromptOverride ??
+            `You are an expert chess instructor narrating a teaching branch — a hypothetical alternative move sequence the lesson is briefly demonstrating on the board.${ttsMode ? ' Spoken natural language only, no markdown.' : ''}`,
+        },
+        { role: 'user', content: branchPrompt },
+      ];
+
+      const result = await runResilientTextGeneration({
+        client,
+        model: model.id,
+        messages,
+        temperature: 0.8,
+        responseOptions: {
+          promptLevel: 'p0',
+          maxTokens: Math.max(model.maxTokens ?? 600, 600),
+          reasoningEffort: model.reasoningEffort,
+        },
+        abortSignal: abortCtrl.signal,
+        onText: (text) => this.updateEntryText(entryIndex, text),
+        stallTimeoutMs: 30000,
+        hardTimeoutMs: 90000,
+        maxAttempts: 2,
+      });
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
+      this.active = null;
+      this.completeEntry(
+        entryIndex,
+        result.text || (branch.title ? `Branch: ${branch.title}.` : 'Branch interlude.'),
+        true,
+      );
+    } catch (err) {
+      if (abortCtrl?.signal.aborted) {
+        if (this.activeGenerationAbort === abortCtrl) {
+          this.activeGenerationAbort = null;
+        }
+        this.active = null;
+        return;
+      }
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
+      this.active = null;
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[Commentary] Branch %s failed: %s', branch.id, message);
+      this.completeEntry(
+        entryIndex,
+        branch.title ? `Branch: ${branch.title}.` : 'Branch interlude.',
+        true,
+      );
     }
   }
 

@@ -186,6 +186,60 @@ export interface ErrorOccurredEvent extends BaseEvent {
   };
 }
 
+// ───────────────────────────────────────────────────────────────
+// Branch playback events (Track A instructor board control).
+//
+// A "branch" is a hypothetical line the lesson plays on the actual
+// board, then returns from. Conceptually: pause main → rewind/jump
+// to a starting FEN → play branchMoves[] → restore main position.
+// The reducer tracks branch state separately from the main move
+// history so consumers can render the branch overlay without
+// polluting the canonical move list.
+// ───────────────────────────────────────────────────────────────
+
+export interface BranchStartedEvent extends BaseEvent {
+  type: 'BranchStarted';
+  payload: {
+    /** Stable id for this branch (matches BoardBranch.id if authored). */
+    branchId: string;
+    /** Episode ply the main line was on when the branch fired. */
+    fromMainPly: number;
+    /** FEN we'll rewind to before playing branchMoves[]. */
+    startingFen: string;
+    /** Display title for the banner overlay. Empty string = no banner. */
+    title: string;
+  };
+}
+
+export interface BranchMoveAppliedEvent extends BaseEvent {
+  type: 'BranchMoveApplied';
+  payload: {
+    /** Same branch id as the wrapping BranchStarted. */
+    branchId: string;
+    /** 1-indexed position within this branch's branchMoves[]. */
+    branchPly: number;
+    color: PieceColor;
+    san: string;
+    from: string;
+    to: string;
+    fen: string;
+    isCheck: boolean;
+    isCheckmate: boolean;
+    isCapture: boolean;
+  };
+}
+
+export interface BranchEndedEvent extends BaseEvent {
+  type: 'BranchEnded';
+  payload: {
+    branchId: string;
+    /** FEN of the main line we restored to. */
+    resumeFen: string;
+    /** Episode ply the main line resumes from. Usually == fromMainPly. */
+    resumeMainPly: number;
+  };
+}
+
 export type GameEvent =
   | GameCreatedEvent
   | GameStartedEvent
@@ -198,6 +252,9 @@ export type GameEvent =
   | IllegalMoveAttemptedEvent
   | GameEndedEvent
   | GameAbortedEvent
-  | ErrorOccurredEvent;
+  | ErrorOccurredEvent
+  | BranchStartedEvent
+  | BranchMoveAppliedEvent
+  | BranchEndedEvent;
 
 export type GameEventType = GameEvent['type'];
