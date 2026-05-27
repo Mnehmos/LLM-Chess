@@ -413,6 +413,10 @@ export function BroadcastView() {
         narrationAnnotations={effectiveAnnotations}
         narrationArrows={narrationArrows}
         pgnMoves={pgnMoves}
+        chapters={episode?.chapters}
+        keyIdeas={episode?.keyIdeas}
+        whatToWatch={episode?.whatToWatch}
+        funFacts={episode?.funFacts}
       />
       {/* Whiteboard overlay — full-frame scene that takes over the
           board area when an authored scene matches the current
