@@ -52,8 +52,12 @@ const FILE_NAMES: Record<string, string> = {
  * The original text is preserved for display; this output is only for speech synthesis.
  */
 export function sanToSpoken(text: string): string {
+  // Black-move notation such as "...e5" is useful on screen, but
+  // should be spoken as the move itself rather than "dot dot dot e5".
+  let result = text.replace(/\.{3}\s*(?=(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8]|O-O))/g, ' ');
+
   // Castling first (longer pattern first)
-  let result = text.replace(/\bO-O-O\b/g, 'castles queenside');
+  result = result.replace(/\bO-O-O\b/g, 'castles queenside');
   result = result.replace(/\bO-O\b(?!-)/g, 'castles kingside');
 
   // SAN moves: piece + optional disambiguator + optional capture + destination + optional promotion/check
@@ -96,7 +100,7 @@ export function sanToSpoken(text: string): string {
     return parts.join(' ');
   });
 
-  return result;
+  return result.replace(/\s{2,}/g, ' ').trim();
 }
 
 export interface TextSegment {

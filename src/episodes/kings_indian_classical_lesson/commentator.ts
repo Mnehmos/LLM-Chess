@@ -2,6 +2,7 @@ import { DEFAULT_COMMENTATOR, type EpisodeCommentatorConfig } from '../types';
 
 export const KINGS_INDIAN_CLASSICAL_LESSON_COMMENTATOR: EpisodeCommentatorConfig = {
   ...DEFAULT_COMMENTATOR,
+  model: 'gpt-4.1',
   lessonContext: [
     'Lesson topic: the King\'s Indian Defense, Classical Variation Mar del Plata main line.',
     'You are an AI teacher demonstrating the opening to a chess student who knows classical openings (1.e4 e5, QGD) but is new to hypermodern strategy.',

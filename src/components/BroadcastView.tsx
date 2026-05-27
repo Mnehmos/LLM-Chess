@@ -292,6 +292,30 @@ export function BroadcastView() {
     });
   }, [activeGameState, shortRange, stopReplay, isRunning]);
 
+  const lastMove = computeLastMove(activeGameState);
+  const commentaryEntries = computeCommentaryEntries(activeGameState, commentaryLog);
+  const episode = config.episodeId ? getEpisode(config.episodeId) : undefined;
+
+  // Resolve per-ply ghost arrows from the episode's moveTangents.
+  // Pure function of (pgnMoves, moveTangents) so useMemo is enough —
+  // no effect, no re-resolution mid-capture.
+  const tangentsByPly = useMemo(
+    () => resolveTangentGhostArrows(pgnMoves, episode?.moveTangents ?? []),
+    [pgnMoves, episode?.moveTangents],
+  );
+
+  // Merge ghost arrows for the currently-narrated ply into the
+  // BoardAnnotations flowing to the layout. narrationMoveIndex is
+  // 0-indexed; ply is 1-indexed (ply = narrationMoveIndex + 1).
+  // Outside narration (intro / outro) narrationMoveIndex < 0 and no
+  // ghost arrows are shown.
+  const effectiveAnnotations = useMemo<BoardAnnotations | undefined>(() => {
+    const currentGhosts = narrationMoveIndex >= 0 ? tangentsByPly.get(narrationMoveIndex + 1) : undefined;
+    if (!currentGhosts || currentGhosts.length === 0) return narrationAnnotations;
+    const base: BoardAnnotations = narrationAnnotations ?? { arrows: [], highlights: [], circles: [] };
+    return { ...base, ghostArrows: currentGhosts };
+  }, [narrationAnnotations, narrationMoveIndex, tangentsByPly]);
+
   if (loadError) {
     return (
       <div className="min-h-screen bg-surface-0 flex items-center justify-center">
@@ -340,30 +364,6 @@ export function BroadcastView() {
   //
   // The off-screen TournamentProgress is moved to fixed `top: -10000px`
   // so it does not intercept paint nor inflate the captured viewport.
-  const lastMove = computeLastMove(activeGameState);
-  const commentaryEntries = computeCommentaryEntries(activeGameState, commentaryLog);
-  const episode = config.episodeId ? getEpisode(config.episodeId) : undefined;
-
-  // Resolve per-ply ghost arrows from the episode's moveTangents.
-  // Pure function of (pgnMoves, moveTangents) so useMemo is enough —
-  // no effect, no re-resolution mid-capture.
-  const tangentsByPly = useMemo(
-    () => resolveTangentGhostArrows(pgnMoves, episode?.moveTangents ?? []),
-    [pgnMoves, episode?.moveTangents],
-  );
-
-  // Merge ghost arrows for the currently-narrated ply into the
-  // BoardAnnotations flowing to the layout. narrationMoveIndex is
-  // 0-indexed; ply is 1-indexed (ply = narrationMoveIndex + 1).
-  // Outside narration (intro / outro) narrationMoveIndex < 0 and no
-  // ghost arrows are shown.
-  const effectiveAnnotations = useMemo<BoardAnnotations | undefined>(() => {
-    const currentGhosts = narrationMoveIndex >= 0 ? tangentsByPly.get(narrationMoveIndex + 1) : undefined;
-    if (!currentGhosts || currentGhosts.length === 0) return narrationAnnotations;
-    const base: BoardAnnotations = narrationAnnotations ?? { arrows: [], highlights: [], circles: [] };
-    return { ...base, ghostArrows: currentGhosts };
-  }, [narrationAnnotations, narrationMoveIndex, tangentsByPly]);
-
   return (
     <>
       <div style={{ position: 'fixed', top: -10000, left: 0, width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' }} aria-hidden>
