@@ -1,0 +1,34 @@
+{
+  "version": "1.0.0",
+  "producer": {
+    "path": "src/llm",
+    "language": "typescript",
+    "include": [
+      "**/*.ts"
+    ],
+    "exclude": [
+      "**/*.test.ts",
+      "**/node_modules/**",
+      "**/dist/**"
+    ]
+  },
+  "consumer": {
+    "path": "src",
+    "language": "typescript",
+    "include": [
+      "**/*.ts",
+      "**/*.tsx"
+    ],
+    "exclude": [
+      "**/*.test.ts",
+      "**/node_modules/**",
+      "**/dist/**"
+    ]
+  },
+  "options": {
+    "strict": false,
+    "direction": "producer_to_consumer",
+    "debounceMs": 300,
+    "autoWatch": true
+  }
+}
