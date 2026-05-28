@@ -4,6 +4,7 @@ import { v4 as uuid } from 'uuid';
 import { GameRuntime } from '../engine/runtime';
 import { Chess } from 'chess.js';
 import { parseSinglePgn, pgnResultToGameResult } from '../pgn/parser';
+import { getActiveAudioNarrationQueue } from '../tts/audio-queue';
 import type {
   CommentatorConfig,
   EvalLogEntry,
@@ -751,11 +752,26 @@ export const useTournamentStore = create<TournamentStore>()(
         // sequence in the post-game .then() block.
         if (config.boardBranches && config.boardBranches.length > 0) {
           runtime.setBoardBranches(config.boardBranches);
+          // Helper: gate the runtime on a newly-completed commentary entry
+          // ACTUALLY reaching the audio queue and finishing playback.
+          // Without waitForEntryCount, _waitForNarration races with React's
+          // useEffect that enqueues the completed entry — the queue is still
+          // idle at the moment of the call, so waitUntilDone returns
+          // immediately and the runtime advances before audio plays.
+          const drainNewNarration = async () => {
+            const audioQueue = getActiveAudioNarrationQueue();
+            if (audioQueue) {
+              const target = audioQueue.backlogEntries + 1;
+              await audioQueue.waitForEntryCount(target, 3000);
+            }
+            if (_waitForNarration) await _waitForNarration();
+          };
+
           runtime.setBranchNarrationHook(async (branch, startingFen) => {
             if (!_commentaryQueue) return;
             try {
               await _commentaryQueue.generateBranch(branch, startingFen);
-              if (_waitForNarration) await _waitForNarration();
+              await drainNewNarration();
             } catch (err) {
               console.warn('[Replay] branch narration failed — branch will play silently:', err);
             }
@@ -772,7 +788,7 @@ export const useTournamentStore = create<TournamentStore>()(
                 fenBefore,
                 branchNarrationCue: branch.narrationCue,
               });
-              if (_waitForNarration) await _waitForNarration();
+              await drainNewNarration();
             } catch (err) {
               console.warn(
                 `[Replay] branch per-move narration failed at ply ${branchPly} — move will play silently:`,
@@ -790,7 +806,7 @@ export const useTournamentStore = create<TournamentStore>()(
                 finalFen,
                 branchNarrationCue: branch.narrationCue,
               });
-              if (_waitForNarration) await _waitForNarration();
+              await drainNewNarration();
             } catch (err) {
               console.warn(
                 `[Replay] branch closing narration failed — snap-back will be silent:`,

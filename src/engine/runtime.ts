@@ -289,11 +289,16 @@ export class GameRuntime {
         branchId: branch.id,
         fromMainPly: mainPly,
         startingFen,
+        // Board renders THIS during the opening narration so the
+        // viewer hears the framing on the main-line position before
+        // the rewind. BranchPositionRewound (below) snaps to startingFen.
+        mainLineFen: mainFenBeforeBranch,
         title: branch.title ?? '',
       },
     });
 
-    // Let the commentary queue lead with branch narration.
+    // Opening narration plays with board still on main line —
+    // context first, then the visual rewind.
     if (this.branchNarrationHook) {
       try {
         await this.branchNarrationHook(branch, startingFen);
@@ -303,8 +308,12 @@ export class GameRuntime {
     }
     if (this.aborted) return;
 
-    // Rewind the chess.js board.
+    // Rewind the chess.js board AND notify the UI to snap the board.
     this.chess.load(startingFen);
+    this.emit({
+      type: 'BranchPositionRewound',
+      payload: { branchId: branch.id, startingFen },
+    });
 
     const delay = branch.branchMoveDelayMs ?? 1800;
     const startColor = this.fenColorAt(startingFen);
@@ -322,26 +331,11 @@ export class GameRuntime {
       const moveColor: PieceColor =
         i % 2 === 0 ? startColor : startColor === 'w' ? 'b' : 'w';
 
-      // Narrate this branch move BEFORE applying it. Pacing is gated on
-      // narration completion — no arbitrary delay between moves.
-      if (this.branchMoveNarrationHook) {
-        try {
-          await this.branchMoveNarrationHook({
-            branch,
-            branchPly: i + 1,
-            san: validation.san!,
-            color: moveColor,
-            fenBefore,
-          });
-        } catch (err) {
-          console.warn(
-            `[Branch ${branch.id}] per-move narration hook threw at ply ${i + 1} — continuing:`,
-            err,
-          );
-        }
-      }
-      if (this.aborted) break;
-
+      // Apply the move FIRST so the board reflects what's about to
+      // be narrated. This matches main-line pacing (move → engine
+      // think dead air → narration). The previous "narrate first,
+      // then apply" caused the board to lag the audio by a full
+      // narration cycle (~15-20s).
       const moveResult = this.chess.applyMove(validation.san!);
       const isCheckmate = this.chess.isGameOver() && this.chess.fen().includes('#'); // best-effort
       this.emit({
@@ -359,6 +353,27 @@ export class GameRuntime {
           isCapture: moveResult.captured !== undefined,
         },
       });
+
+      // Now narrate with the board on the post-move position. The
+      // narration prompt still receives fenBefore so the LLM can
+      // analyze the move that was just played.
+      if (this.branchMoveNarrationHook) {
+        try {
+          await this.branchMoveNarrationHook({
+            branch,
+            branchPly: i + 1,
+            san: validation.san!,
+            color: moveColor,
+            fenBefore,
+          });
+        } catch (err) {
+          console.warn(
+            `[Branch ${branch.id}] per-move narration hook threw at ply ${i + 1} — continuing:`,
+            err,
+          );
+        }
+      }
+      if (this.aborted) break;
 
       // Without a narration hook, fall back to the legacy fixed delay so
       // the board doesn't snap through positions instantly.
