@@ -257,6 +257,24 @@ export function Board({ fen, lastMove, highlightSquares, arrows, annotations }: 
     return map;
   }, [annotations]);
 
+  // Build a map of predicted-piece subscripts by square. Set only when
+  // the narration explicitly named a piece going to a destination
+  // (e.g. "knight to f4", "bishop from c1 to g5"). The viewer sees a
+  // small piece glyph in the square's corner so the model's
+  // expectation reads at a glance without listening to narration.
+  const predictedPieceMap = useMemo(() => {
+    const map = new Map<string, 'k' | 'q' | 'r' | 'b' | 'n' | 'p'>();
+    if (annotations?.highlights) {
+      for (const h of annotations.highlights) {
+        if (h.predictedPiece) {
+          const code = h.predictedPiece[0].toLowerCase() as 'k' | 'q' | 'r' | 'b' | 'n' | 'p';
+          map.set(h.square, code);
+        }
+      }
+    }
+    return map;
+  }, [annotations]);
+
   return (
     <div className="inline-block relative">
       {/* Column labels */}
@@ -299,6 +317,17 @@ export function Board({ fen, lastMove, highlightSquares, arrows, annotations }: 
                 bgStyle = { backgroundColor: isLight ? '#a78bfa' : '#7c3aedcc' };
               }
 
+              const predictedPiece = predictedPieceMap.get(square);
+              // Pick the side to render the predicted subscript in. If
+              // there's a real piece on the square already (a capture
+              // target), use the opposite color so the subscript reads.
+              // Otherwise: side-to-move from the FEN, since the move
+              // hasn't happened yet.
+              const sideToMove = (fen.split(' ')[1] as 'w' | 'b') || 'w';
+              const predictedColor: 'w' | 'b' = piece
+                ? (piece.color === 'w' ? 'b' : 'w')
+                : sideToMove;
+
               return (
                 <div
                   key={square}
@@ -314,6 +343,21 @@ export function Board({ fen, lastMove, highlightSquares, arrows, annotations }: 
                   {piece && (
                     <span className={piece.color === 'w' ? 'text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]' : 'text-gray-900 drop-shadow-[0_1px_1px_rgba(255,255,255,0.3)]'}>
                       {PIECE_SYMBOLS[piece.color === 'w' ? piece.type.toUpperCase() : piece.type]}
+                    </span>
+                  )}
+                  {predictedPiece && (
+                    <span
+                      className={`
+                        absolute bottom-0 right-0 text-xs leading-none pr-0.5 pb-0.5 font-mono pointer-events-none
+                        ${predictedColor === 'w' ? 'text-white drop-shadow-[0_0_2px_rgba(0,0,0,0.95)]' : 'text-gray-900 drop-shadow-[0_0_2px_rgba(255,255,255,0.6)]'}
+                      `}
+                      // Tiny dim background ring so the glyph reads on
+                      // any underlying color (highlight amber, board
+                      // light/dark, captured-piece glyph).
+                      style={{ textShadow: '0 0 3px rgba(0,0,0,0.7), 0 0 6px rgba(0,0,0,0.5)' }}
+                      aria-label={`predicted: ${predictedPiece}`}
+                    >
+                      {PIECE_SYMBOLS[predictedColor === 'w' ? predictedPiece.toUpperCase() : predictedPiece]}
                     </span>
                   )}
                 </div>
