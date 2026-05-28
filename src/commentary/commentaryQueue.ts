@@ -1028,7 +1028,8 @@ Do NOT walk through every branch move individually — the board does that visua
     this.emit();
 
     if (!isFiller) {
-      // Track highest completed move index
+      // Track highest completed move index — only meaningful for
+      // real move commentary, not filler/intro/branch.
       const entry = this.entries[entryIndex];
       if (entry.maxMoveIndex !== undefined && entry.maxMoveIndex > this._lastCommentedMoveIndex) {
         this._lastCommentedMoveIndex = entry.maxMoveIndex;
@@ -1044,15 +1045,26 @@ Do NOT walk through every branch move individually — the board does that visua
         }
       }
       this.moveWaiters = remaining;
-
-      // Flush idle waiters if nothing pending — replay runtime waits on this
-      if (this.pending.length === 0) {
-        const resolvers = this.idleResolvers.splice(0);
-        for (const r of resolvers) r();
-      }
-      // Process any moves that arrived while we were generating
-      this.processNext();
     }
+
+    // Idle bookkeeping runs for BOTH filler and non-filler entries.
+    //
+    // Bug history: previously this block ran only inside the !isFiller
+    // branch, which meant that when a board branch / intro / outro
+    // completed (all isFiller=true), any main commentary that had been
+    // enqueued during the branch generation would never be processed —
+    // processNext was never called, idleResolvers was never flushed.
+    // The replay runtime then awaited waitUntilIdle indefinitely,
+    // producing the 9-hour London hang on 2026-05-28.
+    //
+    // The fix: always drain idleResolvers when the queue is genuinely
+    // idle, and always call processNext so pending entries (filler or
+    // not) get picked up.
+    if (this.pending.length === 0 && this.active === null) {
+      const resolvers = this.idleResolvers.splice(0);
+      for (const r of resolvers) r();
+    }
+    this.processNext();
 
     // Schedule filler if nothing is pending and filler is enabled
     this.scheduleFillerIfIdle();
