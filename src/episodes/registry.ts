@@ -16,6 +16,7 @@ import { LONDON_SYSTEM_LESSON_EPISODE } from './london_system_lesson';
 import { COLLE_SYSTEM_LESSON_EPISODE } from './colle_system_lesson';
 import { STONEWALL_ATTACK_LESSON_EPISODE } from './stonewall_attack_lesson';
 import { KIA_LESSON_EPISODE } from './kings_indian_attack_lesson';
+import { MODERN_DEFENSE_LESSON_EPISODE } from './modern_defense_lesson';
 import type { Episode, EpisodeSource } from './types';
 
 /**
@@ -43,6 +44,7 @@ export const CHESS_EPISODES: Episode[] = [
   COLLE_SYSTEM_LESSON_EPISODE,
   STONEWALL_ATTACK_LESSON_EPISODE,
   KIA_LESSON_EPISODE,
+  MODERN_DEFENSE_LESSON_EPISODE,
 ];
 
 /** Default episode id when no `?episode=` is specified. */
