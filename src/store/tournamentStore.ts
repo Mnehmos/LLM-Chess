@@ -780,6 +780,24 @@ export const useTournamentStore = create<TournamentStore>()(
               );
             }
           });
+          runtime.setBranchClosingNarrationHook(async ({ branch, finalFen }) => {
+            if (!_commentaryQueue) return;
+            try {
+              await _commentaryQueue.generateBranchClosing({
+                branchId: branch.id,
+                branchTitle: branch.title ?? '',
+                branchMoves: branch.branchMoves,
+                finalFen,
+                branchNarrationCue: branch.narrationCue,
+              });
+              if (_waitForNarration) await _waitForNarration();
+            } catch (err) {
+              console.warn(
+                `[Replay] branch closing narration failed — snap-back will be silent:`,
+                err,
+              );
+            }
+          });
         }
 
         runtime.subscribe((state: GameState, event: GameEvent) => {

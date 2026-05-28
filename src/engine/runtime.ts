@@ -90,6 +90,18 @@ export class GameRuntime {
         fenBefore: string;
       }) => Promise<void>)
     | null = null;
+  /**
+   * Optional hook fired AFTER the branch's last move applies but BEFORE
+   * the snap-back to the main line. Gives the lesson room to deliver
+   * an engine-style verdict on the resulting position so the snap-back
+   * doesn't feel abrupt or skip the punchline.
+   */
+  private branchClosingNarrationHook:
+    | ((params: {
+        branch: BoardBranch;
+        finalFen: string;
+      }) => Promise<void>)
+    | null = null;
 
   constructor(
     white: PlayerConfig,
@@ -240,6 +252,17 @@ export class GameRuntime {
   }
 
   /**
+   * Set the branch-closing narration hook. The runtime awaits this
+   * after the branch's last move but before the snap-back, so the
+   * lesson delivers a verdict on the resulting position.
+   */
+  setBranchClosingNarrationHook(
+    fn: ((params: { branch: BoardBranch; finalFen: string }) => Promise<void>) | null,
+  ): void {
+    this.branchClosingNarrationHook = fn;
+  }
+
+  /**
    * Execute a branch: emit BranchStarted, rewind board to startingFen,
    * play each branch move (validating via chess.js, awaiting the move
    * delay between each), then emit BranchEnded and restore the main
@@ -345,6 +368,23 @@ export class GameRuntime {
         !this.aborted
       ) {
         await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+
+    // Deliver the closing verdict on the branch (engine read, who's
+    // comfortable, the lesson takeaway) BEFORE snapping back. Without
+    // this the snap-back feels abrupt and skips the punchline.
+    if (!this.aborted && this.branchClosingNarrationHook) {
+      try {
+        await this.branchClosingNarrationHook({
+          branch,
+          finalFen: this.chess.fen(),
+        });
+      } catch (err) {
+        console.warn(
+          `[Branch ${branch.id}] closing narration hook threw — continuing:`,
+          err,
+        );
       }
     }
 

@@ -558,16 +558,21 @@ Provide a post-game recap: summarize the key moments, turning points, and decisi
 
     const ttsMode = this.config.getTtsMode?.() ?? false;
     const titleLine = branch.title ? `Branch title: ${branch.title}.\n` : '';
-    const branchPrompt = `You are narrating a teaching BRANCH — a hypothetical alternative line the lesson is about to play on the board. The viewer will SEE the next ${branch.branchMoves.length} moves play out, then the board snaps back to the main line.
+    const branchPrompt = `You are narrating the OPENING of a teaching branch — a hypothetical alternative line the lesson is about to demonstrate on the board. The viewer will SEE the next ${branch.branchMoves.length} moves play out (each narrated separately), then the board snaps back to the main line.
 
 ${titleLine}Branch starting position FEN: ${startingFen}
 Branch moves (will play in this order): ${branch.branchMoves.join(' ')}
 
 Educational point of the branch: ${branch.narrationCue}
 
-Write 2-3 spoken sentences that OPEN the branch — frame what the viewer is about to see, the question this branch answers, and what to watch for. ${ttsMode ? 'Spoken naturally, no markdown.' : 'Use rich markdown.'}
+Set the stage with real depth — 3-5 spoken sentences covering:
+- What QUESTION about chess this branch answers (e.g. "what does Black do if they go straight for the throat with ...c5?").
+- The strategic theme at stake (king safety, piece activity, structural commitment, the engine's read of the position).
+- The general SHAPE of how this branch will play — without spoiling every move (the per-move narration does that). What's the recurring idea? What's the punch you're watching for?
 
-Do NOT walk through every branch move individually — the board does that visually. Stay at the strategic / "why we're showing this" level. Do NOT reference "the video", "the viewer", or "the audience". Do NOT add a closing transition; the runtime will return to the main line on its own.`;
+${ttsMode ? 'Spoken naturally, no markdown.' : 'Use plain prose.'}
+
+Do NOT walk through every branch move individually — the per-move narration covers that. Do NOT reference "the video", "the viewer", or "the audience". Do NOT add a closing transition; a separate closing narration will fire at the end of the branch.`;
 
     try {
       const client = this.config.getClient();
@@ -584,6 +589,8 @@ Do NOT walk through every branch move individually — the board does that visua
         { role: 'user', content: branchPrompt },
       ];
 
+      const branchOpeningIsReasoning = !!buildReasoningParams(model.id);
+      const branchOpeningMaxTokens = branchOpeningIsReasoning ? 12000 : 2500;
       const result = await runResilientTextGeneration({
         client,
         model: model.id,
@@ -591,13 +598,13 @@ Do NOT walk through every branch move individually — the board does that visua
         temperature: 0.8,
         responseOptions: {
           promptLevel: 'p0',
-          maxTokens: Math.max(model.maxTokens ?? 600, 600),
+          maxTokens: branchOpeningMaxTokens,
           reasoningEffort: model.reasoningEffort,
         },
         abortSignal: abortCtrl.signal,
         onText: (text) => this.updateEntryText(entryIndex, text),
         stallTimeoutMs: 30000,
-        hardTimeoutMs: 90000,
+        hardTimeoutMs: 120000,
         maxAttempts: 2,
       });
       if (this.activeGenerationAbort === abortCtrl) {
@@ -682,18 +689,24 @@ Do NOT walk through every branch move individually — the board does that visua
     // for conveying the lesson to the student without skipping over
     // anything... Chess isn't magically always one line and no plan
     // survives a punch in the face."
-    const prompt = `You are teaching a chess lesson and currently demonstrating an alternative line titled "${params.branchTitle}".
+    const prompt = `You are teaching a deep chess lesson and currently demonstrating an alternative line titled "${params.branchTitle}".
 
 Why this line matters: ${params.branchNarrationCue}
 
 Position FEN BEFORE this move: ${params.fenBefore}
 You are about to play: ${colorWord}'s ${params.san} (move ${params.branchPly} of the alternative line)
 
-Narrate this move the same way you'd narrate any main-lesson move: explain what it does, why it's the natural follow-up in THIS line, and what idea, threat, or principle it demonstrates. 1-3 spoken sentences. Speak in first person — you are playing both sides ("I play ${params.san}…").
+Narrate this move with real depth — the student needs to *understand* chess, not just hear move names. Cover, in spoken first-person ("I play ${params.san}…"):
 
-${ttsMode ? 'Spoken naturally, no markdown.' : 'Use plain prose, no markdown headers.'}
+1. **What the move does concretely** — squares it covers, pieces it eyes, structure it commits to.
+2. **How a strong engine reads the position** — material balance, king safety, piece activity, pawn structure, space, who has the better minor pieces. If the engine evaluation has a clear winner, say which side and why.
+3. **Why this move is the natural follow-up in THIS line** — the plan being executed, the system idea it serves.
+4. **The most punishing reply you're watching for** — chess isn't one line, no plan survives a punch in the face. Name the critical defensive or counter-attacking idea the opponent might try and what you'd do about it.
+5. **What to expect next** — likely candidate moves, structural shifts, the kind of position you're steering toward.
 
-Do NOT recap the whole branch. Do NOT introduce yourself. Do NOT mention "the video", "the viewer", or "the audience". Treat this move with the same care as a main-line move — every move in chess teaching matters; nothing is a silent pass-through.`;
+Be thorough. 3-6 spoken sentences. ${ttsMode ? 'Spoken naturally, no markdown.' : 'Use plain prose, no markdown headers.'}
+
+Do NOT recap the whole branch from the start. Do NOT introduce yourself. Do NOT mention "the video", "the viewer", or "the audience". Every branch move is a real teaching beat — match the depth of a main-line move.`;
 
     try {
       const client = this.config.getClient();
@@ -710,8 +723,15 @@ Do NOT recap the whole branch. Do NOT introduce yourself. Do NOT mention "the vi
         { role: 'user', content: prompt },
       ];
 
-      // Branch moves get the SAME token budget as main-line commentary
-      // — they're not tweet-sized blurbs, they're real teaching beats.
+      // Branch moves are core lesson content — depth over economy.
+      // Per user directive 2026-05-28: "fuck token limits, we want to
+      // *know* how chess is working, how the stockfish analyzer sees
+      // the board, how variations play out, what to expect when the
+      // punch comes for your plan, etc". Generous budget so the
+      // narration has room to explain engine eval + variations +
+      // counter-punch ideas without ever being truncated mid-sentence.
+      const isReasoningModel = !!buildReasoningParams(model.id);
+      const branchMoveMaxTokens = isReasoningModel ? 12000 : 2500;
       const result = await runResilientTextGeneration({
         client,
         model: model.id,
@@ -719,13 +739,13 @@ Do NOT recap the whole branch. Do NOT introduce yourself. Do NOT mention "the vi
         temperature: 0.7,
         responseOptions: {
           promptLevel: 'p0',
-          maxTokens: model.maxTokens ?? 400,
+          maxTokens: branchMoveMaxTokens,
           reasoningEffort: model.reasoningEffort,
         },
         abortSignal: abortCtrl.signal,
         onText: (text) => this.updateEntryText(entryIndex, text),
         stallTimeoutMs: 30000,
-        hardTimeoutMs: 90000,
+        hardTimeoutMs: 180000,
         maxAttempts: 2,
       });
       if (this.activeGenerationAbort === abortCtrl) {
@@ -752,6 +772,126 @@ Do NOT recap the whole branch. Do NOT introduce yourself. Do NOT mention "the vi
       const message = err instanceof Error ? err.message : String(err);
       console.warn('[Commentary] BranchMove %s ply=%d failed: %s', params.branchId, params.branchPly, message);
       this.completeEntry(entryIndex, `${colorWord} plays ${params.san}.`, true);
+    }
+  }
+
+  /**
+   * Generate the CLOSING narration for a branch after its last move has
+   * played but before the board snaps back to the main line. The student
+   * needs to understand the resulting position — engine eval, who's
+   * comfortable, what the long-term verdict on this line is, and why we
+   * called this branch what we called it. Without this, the snap-back
+   * feels abrupt and the lesson skips the punchline.
+   *
+   * Distinct from generateBranch (opening) and generateBranchMove (per-move).
+   */
+  async generateBranchClosing(params: {
+    branchId: string;
+    branchTitle: string;
+    branchMoves: string[];
+    finalFen: string;
+    branchNarrationCue: string;
+  }): Promise<void> {
+    if (this.destroyed) return;
+    const model = this.config.getCommentatorModel();
+    if (!model.id) return;
+    console.log('[Commentary] generateBranchClosing %s', params.branchId);
+
+    this.active = [];
+
+    const entry: CommentaryEntry = {
+      id: genId(),
+      moves: [],
+      text: '',
+      streaming: true,
+      timestamp: Date.now(),
+      maxMoveIndex: -1,
+      isFiller: true,
+    };
+    this.entries = [...this.entries, entry];
+    const entryIndex = this.entries.length - 1;
+    this.emit();
+    let abortCtrl: AbortController | null = null;
+
+    const ttsMode = this.config.getTtsMode?.() ?? false;
+    const prompt = `You are closing out a teaching BRANCH titled "${params.branchTitle}". The board has just finished playing the branch's last move; it is about to snap back to the main line.
+
+Branch played: ${params.branchMoves.join(' ')}
+Final position FEN: ${params.finalFen}
+Why this branch matters: ${params.branchNarrationCue}
+
+Deliver the CLOSING verdict on this line — 3-5 spoken sentences in first person. Cover:
+
+1. **How this position reads to a strong engine** — material, who has the safer king, who has the more active pieces, who has the better structure, an approximate evaluation (small/clear/decisive advantage to either side, or equal).
+2. **The strategic verdict on the line** — does this branch refute the idea? Hold it? Show it's playable but uncomfortable? Be specific about WHO this line favors and WHY.
+3. **What the student should take away** — the principle this branch demonstrates, the warning sign to watch for if the same shape appears in their own games.
+4. A brief, natural cue that we're now returning to the main line.
+
+${ttsMode ? 'Spoken naturally, no markdown.' : 'Use plain prose.'}
+
+Do NOT replay every branch move from the start. Do NOT mention "the video", "the viewer", or "the audience". Be a teacher delivering the verdict on what just played out.`;
+
+    try {
+      const client = this.config.getClient();
+      abortCtrl = new AbortController();
+      this.activeGenerationAbort = abortCtrl;
+
+      const messages: import('../llm/prompts').ChatMessage[] = [
+        {
+          role: 'system',
+          content:
+            this.config.systemPromptOverride ??
+            `You are an expert chess instructor delivering the closing verdict on a teaching branch.${ttsMode ? ' Spoken natural language only, no markdown.' : ''}`,
+        },
+        { role: 'user', content: prompt },
+      ];
+
+      const closingIsReasoning = !!buildReasoningParams(model.id);
+      const closingMaxTokens = closingIsReasoning ? 12000 : 2500;
+      const result = await runResilientTextGeneration({
+        client,
+        model: model.id,
+        messages,
+        temperature: 0.7,
+        responseOptions: {
+          promptLevel: 'p0',
+          maxTokens: closingMaxTokens,
+          reasoningEffort: model.reasoningEffort,
+        },
+        abortSignal: abortCtrl.signal,
+        onText: (text) => this.updateEntryText(entryIndex, text),
+        stallTimeoutMs: 30000,
+        hardTimeoutMs: 180000,
+        maxAttempts: 2,
+      });
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
+      this.active = null;
+      this.completeEntry(
+        entryIndex,
+        result.text || `That's the verdict on ${params.branchTitle}. Back to the main line.`,
+        true,
+      );
+    } catch (err) {
+      if (abortCtrl?.signal.aborted) {
+        if (this.activeGenerationAbort === abortCtrl) {
+          this.activeGenerationAbort = null;
+        }
+        this.active = null;
+        return;
+      }
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
+      this.active = null;
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[Commentary] BranchClosing %s failed: %s', params.branchId, message);
+      this.completeEntry(
+        entryIndex,
+        `That's the verdict on ${params.branchTitle}. Back to the main line.`,
+        true,
+      );
     }
   }
 
