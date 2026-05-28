@@ -215,14 +215,17 @@ export class GameRuntime {
    * from the right position.
    */
   private async executeBranch(branch: BoardBranch, mainPly: number): Promise<void> {
-    if (this.aborted) return;
+    const tag = `[branch-debug ${branch.id}]`;
+    console.log(`${tag} executeBranch entered (mainPly=${mainPly}, aborted=${this.aborted})`);
+    if (this.aborted) {
+      console.log(`${tag} early-return: aborted`);
+      return;
+    }
     const mainFenBeforeBranch = this.chess.fen();
-    // Resolve startingFen: rewind to fromPly (if specified < afterPly).
-    // Otherwise use the current position. fromPly is 1-indexed; index
-    // into fenHistory[N] = FEN AFTER ply N (fenHistory[0] = starting).
     const fromPly = branch.fromPly ?? branch.afterPly;
     const rewindIndex = Math.max(0, Math.min(this.fenHistory.length - 1, fromPly));
     const startingFen = this.fenHistory[rewindIndex] ?? mainFenBeforeBranch;
+    console.log(`${tag} resolved startingFen (rewindIndex=${rewindIndex}, fenHistory.length=${this.fenHistory.length})`);
 
     this.emit({
       type: 'BranchStarted',
@@ -233,29 +236,37 @@ export class GameRuntime {
         title: branch.title ?? '',
       },
     });
+    console.log(`${tag} BranchStarted emitted`);
 
     // Let the commentary queue lead with branch narration.
     if (this.branchNarrationHook) {
+      console.log(`${tag} calling branchNarrationHook…`);
       try {
         await this.branchNarrationHook(branch, startingFen);
+        console.log(`${tag} branchNarrationHook returned`);
       } catch (err) {
-        console.warn('[Branch] narration hook threw — continuing:', err);
+        console.warn(`${tag} narration hook threw — continuing:`, err);
       }
+    } else {
+      console.log(`${tag} no branchNarrationHook installed`);
     }
-    if (this.aborted) return;
+    if (this.aborted) {
+      console.log(`${tag} early-return after hook: aborted`);
+      return;
+    }
 
     // Rewind the chess.js board.
+    console.log(`${tag} loading startingFen onto chess.js…`);
     this.chess.load(startingFen);
+    console.log(`${tag} startingFen loaded, beginning branch move loop (${branch.branchMoves.length} moves)`);
 
     const delay = branch.branchMoveDelayMs ?? 1800;
     for (let i = 0; i < branch.branchMoves.length; i++) {
-      if (this.aborted) break;
+      if (this.aborted) { console.log(`${tag} aborted mid-loop at i=${i}`); break; }
       const san = branch.branchMoves[i];
       const validation = this.chess.validateMove(san);
       if (!validation.legal) {
-        console.warn(
-          `[Branch ${branch.id}] illegal move ${san} at branch ply ${i + 1} — skipping rest of branch`,
-        );
+        console.warn(`${tag} illegal move ${san} at branch ply ${i + 1} — skipping rest of branch`);
         break;
       }
       const moveResult = this.chess.applyMove(validation.san!);
@@ -275,6 +286,7 @@ export class GameRuntime {
           isCapture: moveResult.captured !== undefined,
         },
       });
+      console.log(`${tag} branchPly ${i + 1}/${branch.branchMoves.length} applied: ${validation.san}`);
       if (i < branch.branchMoves.length - 1 && !this.aborted) {
         await new Promise((r) => setTimeout(r, delay));
       }
@@ -288,6 +300,7 @@ export class GameRuntime {
     const resumeMainPly = branch.returnToPly ?? mainPly;
     const resumeFenIndex = Math.max(0, Math.min(this.fenHistory.length - 1, resumeMainPly));
     const resumeFen = this.fenHistory[resumeMainPly === mainPly ? this.fenHistory.length - 1 : resumeFenIndex] ?? mainFenBeforeBranch;
+    console.log(`${tag} restoring main FEN (resumeMainPly=${resumeMainPly}, resumeFenIndex=${resumeFenIndex})`);
     this.chess.load(resumeFen);
 
     this.emit({
@@ -298,6 +311,7 @@ export class GameRuntime {
         resumeMainPly,
       },
     });
+    console.log(`${tag} executeBranch returning normally`);
   }
 
   /** Return whose turn it is at `fen` (w or b). */
@@ -546,7 +560,9 @@ export class GameRuntime {
             const mainPly = this.priorSanMoves.length + this.replayMoveIndex;
             const branch = this.boardBranches.get(mainPly);
             if (branch && !this.aborted) {
+              console.log(`[branch-debug] about to call executeBranch (id=${branch.id}, mainPly=${mainPly})`);
               await this.executeBranch(branch, mainPly);
+              console.log(`[branch-debug] executeBranch await returned for ${branch.id}`);
             }
           } else {
             console.error(`[Replay] PGN move illegal: ${replaySan} at index ${this.replayMoveIndex}`);

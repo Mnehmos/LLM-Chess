@@ -752,13 +752,24 @@ export const useTournamentStore = create<TournamentStore>()(
         if (config.boardBranches && config.boardBranches.length > 0) {
           runtime.setBoardBranches(config.boardBranches);
           runtime.setBranchNarrationHook(async (branch, startingFen) => {
-            if (!_commentaryQueue) return;
-            try {
-              await _commentaryQueue.generateBranch(branch, startingFen);
-              if (_waitForNarration) await _waitForNarration();
-            } catch (err) {
-              console.warn('[Replay] branch narration failed — branch will play silently:', err);
+            console.log(`[branch-debug hook ${branch.id}] entered`);
+            if (!_commentaryQueue) {
+              console.log(`[branch-debug hook ${branch.id}] no commentary queue, returning`);
+              return;
             }
+            try {
+              console.log(`[branch-debug hook ${branch.id}] calling generateBranch…`);
+              await _commentaryQueue.generateBranch(branch, startingFen);
+              console.log(`[branch-debug hook ${branch.id}] generateBranch returned`);
+              if (_waitForNarration) {
+                console.log(`[branch-debug hook ${branch.id}] awaiting _waitForNarration…`);
+                await _waitForNarration();
+                console.log(`[branch-debug hook ${branch.id}] _waitForNarration resolved`);
+              }
+            } catch (err) {
+              console.warn(`[branch-debug hook ${branch.id}] threw — branch will play silently:`, err);
+            }
+            console.log(`[branch-debug hook ${branch.id}] returning normally`);
           });
         }
 
