@@ -355,24 +355,24 @@ async function waitForPlaybackEnd(page: Page, options: CaptureOptions): Promise<
     await Promise.race([donePromise, page.waitForTimeout(options.previewDurationMs)]);
     return;
   }
-  // Game-review captures: be generous with the timeout.
+  // Game-review captures: NO TIMEOUT.
   //
-  // Sizing rationale:
-  //   - A bare Morphy game is ~3 minutes of moves but high-reasoning
-  //     commentary can push it to 25-30 minutes.
-  //   - Fully-featured lessons (multi-modal layout + 3-4 board
-  //     branches + 3-4 whiteboard scenes + ghost arrows + book
-  //     standard + futures + outro) easily run 45-75 minutes:
-  //     · Each branch interlude ~60-120s (narration + 4-6 moves)
-  //     · Each whiteboard scene ~12-15s narrated
-  //     · Final-position-plus-futures + outro ~3-4 min
-  //   - London (gpt-5.5 commentary, 4 branches, 4 whiteboards)
-  //     timed out at 60 min on 2026-05-28; bump to 120 min.
+  // Fully-featured lessons (multi-modal layout + 3-4 board branches +
+  // 3-4 whiteboard scenes + ghost arrows + book standard + futures +
+  // outro) with gpt-5.5 high-reasoning commentary can run anywhere
+  // from 30 min to several hours depending on commentary length, TTS
+  // queue depth, and OpenAI API response latency. Any hard ceiling
+  // produces false-positive failures mid-capture (London timed out
+  // at 60 min on 2026-05-28 in the middle of a branch interlude;
+  // the user's directive was "no ceiling").
   //
-  // Override via endTimeoutMs. Should match the launching node
-  // process's own timeout to avoid the orchestrator dying before
-  // the capture completes.
-  const timeout = options.endTimeoutMs ?? 120 * 60_000;
+  // Playwright's page.waitForFunction with timeout: 0 disables the
+  // timeout entirely. The capture only ends when the SPA bridge
+  // signals state().ended (which it does cleanly at the end of every
+  // healthy run) or the user kills the process.
+  //
+  // Override via endTimeoutMs only if you specifically need a cap.
+  const timeout = options.endTimeoutMs ?? 0;
   await page.waitForFunction(
     () => Boolean(window.__CHESS_EXPORT__?.state().ended),
     undefined,
