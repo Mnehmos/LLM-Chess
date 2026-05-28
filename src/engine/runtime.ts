@@ -72,6 +72,24 @@ export class GameRuntime {
   private branchNarrationHook:
     | ((branch: BoardBranch, startingFen: string) => Promise<void>)
     | null = null;
+  /**
+   * Optional hook called BEFORE each individual branch move plays.
+   * The commentary queue uses this to generate + narrate a one-line
+   * explanation of what THIS move does — so branches don't rip
+   * through silently after the opening narration.
+   *
+   * Awaited before the move is applied; the move + delay only happen
+   * once the narration audio completes.
+   */
+  private branchMoveNarrationHook:
+    | ((params: {
+        branch: BoardBranch;
+        branchPly: number;
+        san: string;
+        color: PieceColor;
+        fenBefore: string;
+      }) => Promise<void>)
+    | null = null;
 
   constructor(
     white: PlayerConfig,
@@ -204,6 +222,24 @@ export class GameRuntime {
   }
 
   /**
+   * Set the per-branch-move narration hook. The runtime awaits this
+   * before applying each branch move, so each branch move gets its
+   * own spoken explanation (instead of a silent pass-through after
+   * the branch opening).
+   */
+  setBranchMoveNarrationHook(
+    fn: ((params: {
+      branch: BoardBranch;
+      branchPly: number;
+      san: string;
+      color: PieceColor;
+      fenBefore: string;
+    }) => Promise<void>) | null,
+  ): void {
+    this.branchMoveNarrationHook = fn;
+  }
+
+  /**
    * Execute a branch: emit BranchStarted, rewind board to startingFen,
    * play each branch move (validating via chess.js, awaiting the move
    * delay between each), then emit BranchEnded and restore the main
@@ -248,6 +284,7 @@ export class GameRuntime {
     this.chess.load(startingFen);
 
     const delay = branch.branchMoveDelayMs ?? 1800;
+    const startColor = this.fenColorAt(startingFen);
     for (let i = 0; i < branch.branchMoves.length; i++) {
       if (this.aborted) break;
       const san = branch.branchMoves[i];
@@ -258,6 +295,30 @@ export class GameRuntime {
         );
         break;
       }
+      const fenBefore = this.chess.fen();
+      const moveColor: PieceColor =
+        i % 2 === 0 ? startColor : startColor === 'w' ? 'b' : 'w';
+
+      // Narrate this branch move BEFORE applying it. Pacing is gated on
+      // narration completion — no arbitrary delay between moves.
+      if (this.branchMoveNarrationHook) {
+        try {
+          await this.branchMoveNarrationHook({
+            branch,
+            branchPly: i + 1,
+            san: validation.san!,
+            color: moveColor,
+            fenBefore,
+          });
+        } catch (err) {
+          console.warn(
+            `[Branch ${branch.id}] per-move narration hook threw at ply ${i + 1} — continuing:`,
+            err,
+          );
+        }
+      }
+      if (this.aborted) break;
+
       const moveResult = this.chess.applyMove(validation.san!);
       const isCheckmate = this.chess.isGameOver() && this.chess.fen().includes('#'); // best-effort
       this.emit({
@@ -265,7 +326,7 @@ export class GameRuntime {
         payload: {
           branchId: branch.id,
           branchPly: i + 1,
-          color: i % 2 === 0 ? (this.fenColorAt(startingFen) === 'w' ? 'w' : 'b') : this.fenColorAt(startingFen) === 'w' ? 'b' : 'w',
+          color: moveColor,
           san: validation.san!,
           from: moveResult.from,
           to: moveResult.to,
@@ -275,7 +336,14 @@ export class GameRuntime {
           isCapture: moveResult.captured !== undefined,
         },
       });
-      if (i < branch.branchMoves.length - 1 && !this.aborted) {
+
+      // Without a narration hook, fall back to the legacy fixed delay so
+      // the board doesn't snap through positions instantly.
+      if (
+        !this.branchMoveNarrationHook &&
+        i < branch.branchMoves.length - 1 &&
+        !this.aborted
+      ) {
         await new Promise((r) => setTimeout(r, delay));
       }
     }

@@ -260,26 +260,68 @@ export function BroadcastLayout({
     if (!activeChapter || !whatToWatch) return null;
     return whatToWatch.find((b) => b.chapterPly === activeChapter.ply)?.text ?? null;
   }, [activeChapter, whatToWatch]);
-  // Full move list — every ply of the parsed PGN with the current
-  // ply highlighted. Pairs white+black moves into rows.
-  const fullMoveList = useMemo(() => {
+  // Build a paired-row move list from a sequence of {san, color}.
+  // Reused for both the main PGN and an active branch's moves.
+  const buildPairedMoveList = (
+    moves: { san: string; color: 'w' | 'b' }[],
+    startTurnNumber = 1,
+    startColor: 'w' | 'b' = 'w',
+  ): { num: number; white?: string; black?: string; whitePly?: number; blackPly?: number }[] => {
     const pairs: { num: number; white?: string; black?: string; whitePly?: number; blackPly?: number }[] = [];
-    for (let i = 0; i < pgnMoves.length; i++) {
-      const move = pgnMoves[i];
-      const ply = i + 1;
-      const turnNum = Math.ceil(ply / 2);
+    for (let i = 0; i < moves.length; i++) {
+      const m = moves[i];
+      const ply = i + 1; // ply within the supplied sequence
+      // turnNumber for the row: starts at startTurnNumber for the
+      // first WHITE move, increments after each full turn.
+      let turnNum: number;
+      if (startColor === 'w') {
+        turnNum = startTurnNumber + Math.floor(i / 2);
+      } else {
+        // First move is Black — pair up with a phantom White slot.
+        turnNum = startTurnNumber + Math.floor((i + 1) / 2);
+      }
       const last = pairs[pairs.length - 1];
-      if (move.color === 'w') {
-        pairs.push({ num: turnNum, white: move.san, whitePly: ply });
+      if (m.color === 'w') {
+        pairs.push({ num: turnNum, white: m.san, whitePly: ply });
       } else if (last && last.num === turnNum && last.white !== undefined) {
-        last.black = move.san;
+        last.black = m.san;
         last.blackPly = ply;
       } else {
-        pairs.push({ num: turnNum, black: move.san, blackPly: ply });
+        pairs.push({ num: turnNum, black: m.san, blackPly: ply });
       }
     }
     return pairs;
+  };
+
+  // Full move list — every ply of the parsed PGN with the current
+  // ply highlighted. Pairs white+black moves into rows.
+  const fullMoveList = useMemo(() => {
+    return buildPairedMoveList(
+      pgnMoves.map((m) => ({ san: m.san, color: m.color })),
+    );
   }, [pgnMoves]);
+
+  // Branch move list — when a board branch is mid-playback, the
+  // Line-on-board panel switches to show the branch's moves instead
+  // of the main PGN. The currently-active branch ply is highlighted
+  // so the viewer can read along with the board changes (which were
+  // otherwise playing silently with no in-frame text reference —
+  // 2026-05-28 user feedback on the London capture at 2:42 in).
+  const branchMoveList = useMemo(() => {
+    if (!gameState.activeBranch || gameState.activeBranch.moves.length === 0) return null;
+    // Determine starting turn number + side-to-move from the branch's
+    // startingFen so the move numbering matches what the viewer sees
+    // (e.g. branch starting at main ply 5 shows as "3...").
+    const fenParts = gameState.activeBranch.startingFen.split(' ');
+    const startColor = (fenParts[1] as 'w' | 'b') || 'w';
+    const fullmoveNumber = Number(fenParts[5]) || 1;
+    return buildPairedMoveList(
+      gameState.activeBranch.moves.map((m) => ({ san: m.move, color: m.color as 'w' | 'b' })),
+      fullmoveNumber,
+      startColor,
+    );
+  }, [gameState.activeBranch]);
+  const branchActivePly = gameState.activeBranch?.moves.length ?? 0;
   // Fun fact rotator — picks the fact valid for currentPly that has
   // rotated to "now". For v1 we slice by `floor(currentPly / 4)`
   // so a new fact shows every ~4 plies (~2 minutes at lesson pace).
@@ -311,6 +353,11 @@ export function BroadcastLayout({
     />;
   }
   if (useMultiModal && activeChapter) {
+    // When mid-branch, the Line-on-board panel shows the branch's
+    // moves with its own active-ply highlight. Otherwise it shows the
+    // main PGN — same data as before.
+    const displayedMoveList = activeBranch && branchMoveList ? branchMoveList : fullMoveList;
+    const displayedActivePly = activeBranch ? branchActivePly : currentPly;
     return <MultiModalLayout
       displayedFen={displayedFen}
       lastMove={displayedLastMove}
@@ -326,8 +373,8 @@ export function BroadcastLayout({
       totalChapters={(chapters?.length ?? 0)}
       activeKeyIdeas={activeKeyIdeas}
       activeWhatToWatch={activeWhatToWatch}
-      fullMoveList={fullMoveList}
-      activePly={currentPly}
+      fullMoveList={displayedMoveList}
+      activePly={displayedActivePly}
       activeFunFact={activeFunFact}
       activeBranch={activeBranch}
     />;

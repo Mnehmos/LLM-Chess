@@ -631,6 +631,130 @@ Do NOT walk through every branch move individually — the board does that visua
     }
   }
 
+  /**
+   * Generate narration for ONE branch move as it's about to be played
+   * on the board. The runtime calls this BEFORE applying each branch
+   * move so the audio leads the visual. Short (1-2 sentences), in the
+   * commentator's teaching voice, focused on WHY this specific move
+   * follows in the branch.
+   *
+   * Distinct from generateBranch (which produces the branch-OPENING
+   * narration) — this fires per move so the branch isn't a silent
+   * pass-through, which the user flagged as "the fundamental value of
+   * the video" on 2026-05-28.
+   */
+  async generateBranchMove(params: {
+    branchId: string;
+    branchTitle: string;
+    branchPly: number;
+    san: string;
+    color: 'w' | 'b';
+    fenBefore: string;
+    branchNarrationCue: string;
+  }): Promise<void> {
+    if (this.destroyed) return;
+    const model = this.config.getCommentatorModel();
+    if (!model.id) return;
+    console.log('[Commentary] generateBranchMove %s ply=%d: %s', params.branchId, params.branchPly, params.san);
+
+    this.active = [];
+
+    const entry: CommentaryEntry = {
+      id: genId(),
+      moves: [],
+      text: '',
+      streaming: true,
+      timestamp: Date.now(),
+      maxMoveIndex: -1,
+      isFiller: true,
+    };
+    this.entries = [...this.entries, entry];
+    const entryIndex = this.entries.length - 1;
+    this.emit();
+    let abortCtrl: AbortController | null = null;
+
+    const ttsMode = this.config.getTtsMode?.() ?? false;
+    const colorWord = params.color === 'w' ? 'White' : 'Black';
+    // Branch moves are core lesson content — narrate them with the
+    // same depth as main-line commentary. Per user direction
+    // 2026-05-28: "branches are all core part of the video's magic
+    // AI tutor. That AI tutor has full control and responsibility
+    // for conveying the lesson to the student without skipping over
+    // anything... Chess isn't magically always one line and no plan
+    // survives a punch in the face."
+    const prompt = `You are teaching a chess lesson and currently demonstrating an alternative line titled "${params.branchTitle}".
+
+Why this line matters: ${params.branchNarrationCue}
+
+Position FEN BEFORE this move: ${params.fenBefore}
+You are about to play: ${colorWord}'s ${params.san} (move ${params.branchPly} of the alternative line)
+
+Narrate this move the same way you'd narrate any main-lesson move: explain what it does, why it's the natural follow-up in THIS line, and what idea, threat, or principle it demonstrates. 1-3 spoken sentences. Speak in first person — you are playing both sides ("I play ${params.san}…").
+
+${ttsMode ? 'Spoken naturally, no markdown.' : 'Use plain prose, no markdown headers.'}
+
+Do NOT recap the whole branch. Do NOT introduce yourself. Do NOT mention "the video", "the viewer", or "the audience". Treat this move with the same care as a main-line move — every move in chess teaching matters; nothing is a silent pass-through.`;
+
+    try {
+      const client = this.config.getClient();
+      abortCtrl = new AbortController();
+      this.activeGenerationAbort = abortCtrl;
+
+      const messages: import('../llm/prompts').ChatMessage[] = [
+        {
+          role: 'system',
+          content:
+            this.config.systemPromptOverride ??
+            `You are a chess instructor narrating one move at a time inside a hypothetical alternative line.${ttsMode ? ' Spoken natural language only, no markdown.' : ''}`,
+        },
+        { role: 'user', content: prompt },
+      ];
+
+      // Branch moves get the SAME token budget as main-line commentary
+      // — they're not tweet-sized blurbs, they're real teaching beats.
+      const result = await runResilientTextGeneration({
+        client,
+        model: model.id,
+        messages,
+        temperature: 0.7,
+        responseOptions: {
+          promptLevel: 'p0',
+          maxTokens: model.maxTokens ?? 400,
+          reasoningEffort: model.reasoningEffort,
+        },
+        abortSignal: abortCtrl.signal,
+        onText: (text) => this.updateEntryText(entryIndex, text),
+        stallTimeoutMs: 30000,
+        hardTimeoutMs: 90000,
+        maxAttempts: 2,
+      });
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
+      this.active = null;
+      this.completeEntry(
+        entryIndex,
+        result.text || `${colorWord} plays ${params.san}.`,
+        true,
+      );
+    } catch (err) {
+      if (abortCtrl?.signal.aborted) {
+        if (this.activeGenerationAbort === abortCtrl) {
+          this.activeGenerationAbort = null;
+        }
+        this.active = null;
+        return;
+      }
+      if (this.activeGenerationAbort === abortCtrl) {
+        this.activeGenerationAbort = null;
+      }
+      this.active = null;
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[Commentary] BranchMove %s ply=%d failed: %s', params.branchId, params.branchPly, message);
+      this.completeEntry(entryIndex, `${colorWord} plays ${params.san}.`, true);
+    }
+  }
+
   enqueue(item: QueuedMove): void {
     if (this.destroyed) return;
     this.moveTimestamps.push(Date.now());

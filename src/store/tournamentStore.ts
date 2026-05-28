@@ -760,6 +760,26 @@ export const useTournamentStore = create<TournamentStore>()(
               console.warn('[Replay] branch narration failed — branch will play silently:', err);
             }
           });
+          runtime.setBranchMoveNarrationHook(async ({ branch, branchPly, san, color, fenBefore }) => {
+            if (!_commentaryQueue) return;
+            try {
+              await _commentaryQueue.generateBranchMove({
+                branchId: branch.id,
+                branchTitle: branch.title ?? '',
+                branchPly,
+                san,
+                color,
+                fenBefore,
+                branchNarrationCue: branch.narrationCue,
+              });
+              if (_waitForNarration) await _waitForNarration();
+            } catch (err) {
+              console.warn(
+                `[Replay] branch per-move narration failed at ply ${branchPly} — move will play silently:`,
+                err,
+              );
+            }
+          });
         }
 
         runtime.subscribe((state: GameState, event: GameEvent) => {
