@@ -206,8 +206,30 @@ export interface BranchStartedEvent extends BaseEvent {
     fromMainPly: number;
     /** FEN we'll rewind to before playing branchMoves[]. */
     startingFen: string;
+    /**
+     * FEN of the main-line position at the moment the branch fired.
+     * The board renders THIS while the opening narration plays so the
+     * viewer sees "here's where we are; let me show you an alternative"
+     * with full context before the rewind. The rewind to startingFen
+     * happens on `BranchPositionRewound`, after the opening narration.
+     */
+    mainLineFen: string;
     /** Display title for the banner overlay. Empty string = no banner. */
     title: string;
+  };
+}
+
+/**
+ * Emitted AFTER the branch's opening narration finishes but BEFORE
+ * the per-move loop begins. The board snaps to the branch's
+ * `startingFen` on this event — giving the viewer the rewind only
+ * after they've heard the framing.
+ */
+export interface BranchPositionRewoundEvent extends BaseEvent {
+  type: 'BranchPositionRewound';
+  payload: {
+    branchId: string;
+    startingFen: string;
   };
 }
 
@@ -254,6 +276,7 @@ export type GameEvent =
   | GameAbortedEvent
   | ErrorOccurredEvent
   | BranchStartedEvent
+  | BranchPositionRewoundEvent
   | BranchMoveAppliedEvent
   | BranchEndedEvent;
 

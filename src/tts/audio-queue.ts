@@ -381,6 +381,33 @@ export class AudioNarrationQueue {
     });
   }
 
+  /**
+   * Wait until the queue has received at least `targetEntryCount`
+   * total entries via enqueue/enqueueEntry, OR `timeoutMs` elapses.
+   * Closes a React-render race: when a commentary entry completes,
+   * CommentaryPanel's effect needs a render tick to call enqueueEntry.
+   * If the runtime calls waitUntilDone immediately, it sees an idle
+   * queue and returns before the new entry is even queued. Pair this
+   * with waitUntilDone (call it first, then waitUntilDone) to make
+   * narration gating reliable.
+   */
+  waitForEntryCount(targetEntryCount: number, timeoutMs = 3000): Promise<void> {
+    if (this._entryCount >= targetEntryCount) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const start = Date.now();
+      const check = () => {
+        if (this._entryCount >= targetEntryCount) {
+          resolve();
+        } else if (Date.now() - start >= timeoutMs) {
+          resolve();
+        } else {
+          setTimeout(check, 50);
+        }
+      };
+      check();
+    });
+  }
+
   get pendingSegments(): number {
     return this.queue.length;
   }

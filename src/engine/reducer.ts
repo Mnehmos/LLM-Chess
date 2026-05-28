@@ -143,17 +143,32 @@ export function gameReducer(state: GameState, event: GameEvent): GameState {
     // ───────────────────────────────────────────────────────
 
     case 'BranchStarted':
+      // The board stays on the main-line position while the opening
+      // narration plays — giving the viewer the framing BEFORE the
+      // visual rewind. The actual rewind to startingFen happens on
+      // the BranchPositionRewound event below, after the narration.
       return {
         ...withEvent,
         activeBranch: {
           branchId: event.payload.branchId,
           title: event.payload.title,
           startingFen: event.payload.startingFen,
-          currentFen: event.payload.startingFen,
+          currentFen: event.payload.mainLineFen,
           moves: [],
           resumeMainPly: event.payload.fromMainPly,
         },
       };
+
+    case 'BranchPositionRewound': {
+      if (!state.activeBranch) return withEvent;
+      return {
+        ...withEvent,
+        activeBranch: {
+          ...state.activeBranch,
+          currentFen: event.payload.startingFen,
+        },
+      };
+    }
 
     case 'BranchMoveApplied': {
       if (!state.activeBranch) return withEvent;
