@@ -31,6 +31,19 @@ export interface AnnotationArrow {
 export interface AnnotationHighlight {
   square: string;
   color: string;
+  /**
+   * Optional indicator of the piece the model EXPECTS to land on this
+   * square — used for future-state highlights (e.g. "knight to f4",
+   * "bishop from c1 to g5"). When set, the board renders a small
+   * subscript piece glyph in the corner so the viewer can read the
+   * intended piece WITHOUT inferring it from the narration.
+   *
+   * Only populated by parsers that surface a destination square with
+   * a known piece type. Highlights from passive square mentions
+   * (e.g. "watch e5") or current-position annotations
+   * ("queen on d2") leave this undefined.
+   */
+  predictedPiece?: SemanticPiece;
 }
 
 export interface AnnotationCircle {
@@ -354,7 +367,9 @@ function parseNaturalLanguageAnnotations(
     const from = match[2];
     const to = match[3];
     arrows.push({ from, to, color: resolveColor(undefined, 'green'), source: 'natural_language' });
-    highlights.push({ square: to, color: resolveColor(undefined, 'yellow'), source: 'natural_language' });
+    // Destination square — model is predicting THIS piece lands here.
+    // Attach predictedPiece so the board can render a subscript glyph.
+    highlights.push({ square: to, color: resolveColor(undefined, 'yellow'), source: 'natural_language', predictedPiece: piece });
     semanticCues.push({
       kind: 'piece_route',
       piece,
@@ -384,7 +399,9 @@ function parseNaturalLanguageAnnotations(
     const piece = match[1] as SemanticPiece;
     const to = match[2];
     const from = resolveUniquePieceMoveOrigin(options?.fen, options?.sideToMove, piece, to);
-    highlights.push({ square: to, color: resolveColor(undefined, 'yellow'), source: 'natural_language' });
+    // Future-state highlight: piece is going to this square. Attach
+    // predictedPiece so the board can render a subscript glyph.
+    highlights.push({ square: to, color: resolveColor(undefined, 'yellow'), source: 'natural_language', predictedPiece: piece });
     if (from) {
       arrows.push({ from, to, color: resolveColor(undefined, 'green'), source: 'natural_language' });
     }
