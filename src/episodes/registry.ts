@@ -17,6 +17,7 @@ import { COLLE_SYSTEM_LESSON_EPISODE } from './colle_system_lesson';
 import { STONEWALL_ATTACK_LESSON_EPISODE } from './stonewall_attack_lesson';
 import { KIA_LESSON_EPISODE } from './kings_indian_attack_lesson';
 import { MODERN_DEFENSE_LESSON_EPISODE } from './modern_defense_lesson';
+import { PRAGG_RAPPORT_UZCHESS_2025_EPISODE } from './pragg_rapport_uzchess_2025';
 import type { Episode, EpisodeSource } from './types';
 
 /**
@@ -45,6 +46,7 @@ export const CHESS_EPISODES: Episode[] = [
   STONEWALL_ATTACK_LESSON_EPISODE,
   KIA_LESSON_EPISODE,
   MODERN_DEFENSE_LESSON_EPISODE,
+  PRAGG_RAPPORT_UZCHESS_2025_EPISODE,
 ];
 
 /** Default episode id when no `?episode=` is specified. */

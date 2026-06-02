@@ -16,4 +16,5 @@ export {
   listEpisodesBySource,
 } from './registry';
 export { OPERA_GAME_EPISODE } from './opera_game_morphy_1858';
+export { PRAGG_RAPPORT_UZCHESS_2025_EPISODE } from './pragg_rapport_uzchess_2025';
 export { ITALIAN_GAME_LESSON_EPISODE } from './italian_game_lesson';
