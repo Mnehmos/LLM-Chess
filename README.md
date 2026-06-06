@@ -2,6 +2,12 @@
 
 LLM-vs-LLM chess arena, tournament gauntlet, and benchmark app built with React, TypeScript, Vite, Zustand, and `chess.js`. Optional Tauri desktop wrapper.
 
+## Demo
+
+[![LLM Chess demo video](https://img.youtube.com/vi/OGdcelEjD3k/maxresdefault.jpg)](https://www.youtube.com/watch?v=OGdcelEjD3k)
+
+▶️ **[Watch the walkthrough on YouTube](https://www.youtube.com/watch?v=OGdcelEjD3k)**
+
 ## Features
 
 - **Single Game Mode** — Live move streaming, move history, event log, board stepping, and per-move Stockfish evaluation.
